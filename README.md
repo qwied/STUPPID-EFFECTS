@@ -1,24 +1,25 @@
 # STUPPID EFECTS
 
-Сайт для наложения видео-эффектов на фото, видео (со звуком) и GIF прямо в браузере.
+Stack video effects on photos, videos (with sound) and GIFs right in your browser.
 
-- Сколько угодно слоёв эффектов: старт, прозрачность, размер, режим (хромакей / экран / обычный), повтор, порядок.
-- Экспорт от 144p до 4K или в исходном разрешении (MP4 в Chrome/Edge/Safari, WebM в Firefox). Фото без эффектов сохраняется в PNG.
-- Свои шаблоны: кнопка «Свой шаблон» — видео на зелёном или чёрном фоне, режим подбирается сам.
-- Ничего не загружается на сервер, всё считается на устройстве.
+- Unlimited effect layers: start time, opacity, size, mode (chroma key / screen / normal), loop, order.
+- Landscape, portrait and square media are detected automatically; effects rotate and stretch to cover the frame.
+- Save as MP4 (with the original audio) or GIF, from 144p to 4K — Original quality by default.
+- Custom templates: use "Custom template" with any video on a green or black background; the mode is detected automatically.
+- Nothing is uploaded to a server — everything runs on your device.
 
-## Как выложить на GitHub Pages
+## Publish on GitHub Pages
 
-1. Создай репозиторий на GitHub и загрузи в него все файлы из этой папки (`index.html`, `style.css`, `app.js`, `templates/`, `.nojekyll`).
-2. Settings → Pages → Source: **Deploy from a branch**, ветка `main`, папка `/ (root)`.
-3. Через минуту сайт будет на `https://<логин>.github.io/<репозиторий>/`.
+1. Create a repository on GitHub and upload all files from this folder (`index.html`, `style.css`, `app.js`, `explosion.mp4`, `lightning.mp4`, `.nojekyll`, `README.md`).
+2. Settings → Pages → Source: **Deploy from a branch**, branch `main`, folder `/ (root)`.
+3. In a minute the site is live at `https://<username>.github.io/<repository>/`.
 
-## Добавить шаблон навсегда
+## Add a built-in template
 
-Положи видео в `templates/` и допиши строчку в начале `app.js`:
+Put the video next to `index.html` and add a line at the top of `app.js`:
 
 ```js
-{ id: 'smoke', name: 'Дым', url: 'templates/smoke.mp4', mode: 'key' }, // key | screen | normal
+{ id: 'smoke', name: 'Smoke', url: 'smoke.mp4', mode: 'key' }, // key | screen | normal
 ```
 
-> Видео пишется в реальном времени — не сворачивай вкладку во время сохранения.
+> MP4 is recorded in real time: a 10-second clip takes about 10 seconds to save.

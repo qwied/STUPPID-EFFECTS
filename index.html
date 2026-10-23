@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>STUPPID EFECTS</title>
-  <meta name="description" content="Накладывай готовые видео-эффекты на фото, видео и GIF прямо в браузере. Экспорт от 144p до 4K.">
+  <meta name="description" content="Stack ready-made video effects on photos, videos and GIFs right in your browser. Export from 144p to 4K.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='none' stroke='white' stroke-width='3'/%3E%3Cpath d='M16 9v14M9 16h14' stroke='white' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,26 +17,26 @@
   <main>
     <header>
       <h1>STUPPID EFECTS</h1>
-      <p class="sub">Загрузи фото, видео или GIF — накладывай сколько угодно эффектов и сохраняй от 144p до 4K.</p>
+      <p class="sub">Upload a photo, video or GIF — stack as many effects as you like and save from 144p to 4K.</p>
     </header>
 
-    <section id="stage" class="stage" tabindex="0" aria-label="Холст: перетащите файл сюда">
-      <button id="emptyBtn" class="plus" aria-label="Загрузить медиа">
+    <section id="stage" class="stage" tabindex="0" aria-label="Canvas: drop a file here">
+      <button id="emptyBtn" class="plus" aria-label="Attach media">
         <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44"/><path d="M50 28v44M28 50h44"/></svg>
       </button>
       <canvas id="view" hidden></canvas>
-      <div id="dropHint" class="drop-hint" hidden>Отпусти файл</div>
+      <div id="dropHint" class="drop-hint" hidden>Drop the file</div>
       <div id="busy" class="busy" hidden>
         <div class="busy-box">
-          <div id="busyText">Рендер…</div>
+          <div id="busyText">Rendering…</div>
           <div class="bar"><i id="busyBar"></i></div>
-          <button id="cancelBtn" class="pill small">Отмена</button>
+          <button id="cancelBtn" class="pill small">Cancel</button>
         </div>
       </div>
     </section>
 
     <div id="transport" class="transport" hidden>
-      <button id="playBtn" class="icon-btn" aria-label="Пауза">
+      <button id="playBtn" class="icon-btn" aria-label="Pause">
         <svg id="icPause" viewBox="0 0 24 24"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg>
         <svg id="icPlay" viewBox="0 0 24 24" hidden><path d="M7 4.5v15l12-7.5z"/></svg>
       </button>
@@ -48,55 +48,54 @@
     <div class="controls">
       <button id="attachBtn" class="pill">
         <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
-        <span>Загрузить медиа</span>
+        <span>Attach media</span>
       </button>
       <label class="pill select">
         <svg viewBox="0 0 24 24" class="hd"><rect x="3" y="6" width="18" height="12" rx="2.5"/><path d="M7 10v4M10 10v4M7 12h3M13 10v4h2a2 2 0 0 0 0-4z"/></svg>
-        <select id="quality" aria-label="Качество">
+        <select id="quality" aria-label="Quality">
           <option value="144">144p</option>
           <option value="240">240p</option>
           <option value="360">360p</option>
           <option value="480">480p</option>
           <option value="720">720p</option>
-          <option value="1080" selected>1080p</option>
+          <option value="1080">1080p</option>
           <option value="1440">1440p</option>
           <option value="2160">4K</option>
-          <option value="0">Исходное</option>
+          <option value="0" selected>Original</option>
         </select>
         <svg viewBox="0 0 24 24" class="chev"><path d="M6 9l6 6 6-6"/></svg>
       </label>
       <label class="pill select">
-        <select id="format" aria-label="Формат">
+        <select id="format" aria-label="Format">
           <option value="mp4" selected>MP4</option>
-          <option value="mp3">MP3</option>
-          <option value="png">PNG</option>
+          <option value="gif">GIF</option>
         </select>
         <svg viewBox="0 0 24 24" class="chev"><path d="M6 9l6 6 6-6"/></svg>
       </label>
       <button id="exportBtn" class="pill primary" disabled>
         <svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
-        <span>Сохранить</span>
+        <span>Save</span>
       </button>
     </div>
 
     <section class="panel">
       <div class="panel-head">
-        <h2>Шаблоны</h2>
-        <span class="hint">Клик — добавить слой. Один шаблон можно добавить много раз.</span>
+        <h2>Templates</h2>
+        <span class="hint">Click to add a layer. The same template can be added many times.</span>
       </div>
       <div id="templates" class="templates"></div>
     </section>
 
     <section class="panel">
       <div class="panel-head">
-        <h2>Слои <span id="layerCount" class="count">0</span></h2>
-        <button id="clearBtn" class="link" hidden>Очистить</button>
+        <h2>Layers <span id="layerCount" class="count">0</span></h2>
+        <button id="clearBtn" class="link" hidden>Clear</button>
       </div>
       <ol id="layers" class="layers"></ol>
-      <p id="noLayers" class="empty">Пока без эффектов — выбери шаблон выше.</p>
+      <p id="noLayers" class="empty">No effects yet — pick a template above.</p>
     </section>
 
-    <footer>Всё работает в браузере — файлы никуда не загружаются.</footer>
+    <footer>Everything runs in your browser — files are never uploaded.</footer>
   </main>
 
   <input id="fileInput" type="file" accept="image/*,video/*" hidden>

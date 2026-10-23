@@ -1,16 +1,16 @@
-/* STUPPID EFECTS — всё рендерится в браузере (WebGL + MediaRecorder). */
+/* STUPPID EFECTS — everything renders in the browser (WebGL + MediaRecorder). */
 (() => {
   'use strict';
 
-  // ---------- шаблоны ----------
-  // mode: 'key' — зелёный хромакей, 'screen' — светлое на чёрном, 'normal' — просто поверх
+  // ---------- templates ----------
+  // mode: 'key' — green screen, 'screen' — bright on black, 'normal' — plain overlay
   const TEMPLATES = [
-    { id: 'explosion', name: 'Взрыв', url: 'templates/explosion.mp4', mode: 'key' },
-    { id: 'lightning', name: 'Молнии', url: 'templates/lightning.mp4', mode: 'screen' },
+    { id: 'explosion', name: 'Explosion', url: 'explosion.mp4', mode: 'key' },
+    { id: 'lightning', name: 'Lightning', url: 'lightning.mp4', mode: 'screen' },
   ];
-  const MODES = { normal: 'Обычный', key: 'Хромакей', screen: 'Экран' };
-  const PREVIEW_MAX = 720;      // короткая сторона превью
-  const IMAGE_SECONDS = 3;      // длина ролика из фото без эффектов
+  const MODES = { normal: 'Normal', key: 'Chroma key', screen: 'Screen' };
+  const PREVIEW_MAX = 720;      // preview short side
+  const IMAGE_SECONDS = 3;      // clip length for a photo without effects
   const FPS = 30;
 
   const $ = (id) => document.getElementById(id);
@@ -28,29 +28,30 @@
     src: null,          // { kind: 'video'|'image'|'gif', el, w, h, duration, frames, name }
     layers: [],
     playing: true,
-    t0: 0,              // performance.now() в момент t=0
+    t0: 0,              // performance.now() at t=0
     pausedAt: 0,
     exporting: null,
   };
   let layerSeq = 0;
 
-  // ---------- WebGL рендерер ----------
+  // ---------- WebGL renderer ----------
   const gl = ui.view.getContext('webgl', { alpha: false, premultipliedAlpha: true, preserveDrawingBuffer: true, antialias: false });
-  if (!gl) alert('Браузер не поддерживает WebGL — эффекты работать не будут.');
+  if (!gl) alert('Your browser does not support WebGL — effects will not work.');
 
   const VS = `attribute vec2 p; uniform vec2 s; varying vec2 uv;
     void main(){ uv = p*0.5+0.5; gl_Position = vec4(p*s, 0.0, 1.0); }`;
   const FS = `precision mediump float; varying vec2 uv; uniform sampler2D t; uniform int m; uniform float o;
     void main(){
       vec4 c = texture2D(t, uv);
-      if (m == 1) {                                   // хромакей
+      if (m == 1) {                                   // chroma key
         float mx = max(c.r, c.b);
-        float k = c.g - mx;
-        float a = 1.0 - smoothstep(0.04, 0.16, k);
-        c.g = min(c.g, mx + 0.03);                    // убираем зелёный ореол
+        float k = (c.g - mx) / max(c.g, 0.01);        // share of excess green
+        float a = (1.0 - smoothstep(-0.02, 0.07, k))  // green and green mixes become transparent
+                * smoothstep(0.2, 0.55, mx);          // so do dim olive leftovers
+        c.g = min(c.g, mx * 0.9);                     // push remaining green spill to orange
         a *= o;
         gl_FragColor = vec4(c.rgb * a, a);
-      } else if (m == 2) {                            // экран
+      } else if (m == 2) {                            // screen
         gl_FragColor = vec4(c.rgb * o, 1.0);
       } else {
         gl_FragColor = vec4(c.rgb * o, o);
@@ -94,7 +95,7 @@
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  // ---------- время ----------
+  // ---------- time ----------
   const fxEnd = () => state.layers.reduce((e, l) => Math.max(e, l.loop ? 0 : l.start + l.duration), 0);
   function totalDuration() {
     const s = state.src;
@@ -116,7 +117,7 @@
     for (const l of state.layers) syncLayer(l, t, true);
   }
 
-  // держим <video> синхронно с общим временем
+  // keep <video> in sync with the shared clock
   function syncVideo(v, local, active, playing, force) {
     if (!active) {
       if (!v.paused) v.pause();
@@ -137,7 +138,7 @@
     syncVideo(l.video, local, local >= 0 && local < l.duration, state.playing, force);
   }
 
-  // ---------- кадр ----------
+  // ---------- frame ----------
   function render(t) {
     const s = state.src;
     const W = ui.view.width, H = ui.view.height;
@@ -158,8 +159,9 @@
     for (const l of state.layers) {
       const local = layerLocal(l, t);
       if (local < 0 || local >= l.duration || l.video.readyState < 2) continue;
+      // auto fit: the effect keeps its proportions and is stretched to cover the whole frame
       const fa = l.video.videoWidth / l.video.videoHeight;
-      let sx = 1, sy = 1;                       // cover
+      let sx = 1, sy = 1;
       if (fa > outA) sx = fa / outA; else sy = outA / fa;
       drawQuad(l.tex, l.video, l.mode, l.opacity, sx * l.scale, sy * l.scale);
     }
@@ -167,13 +169,16 @@
 
   function tick() {
     requestAnimationFrame(tick);
+    if (!state.exporting) step();             // while exporting, a timer drives step() instead
+  }
+  function step() {
     const s = state.src;
-    if (!s) return;
+    if (!s || state.exporting?.gif) return;   // GIF renders frame by frame itself
     const total = totalDuration();
     let t = currentTime();
 
     if (s.kind === 'video' && state.playing) {
-      // видео — главный источник времени (так звук не прыгает)
+      // video is the master clock (keeps audio smooth)
       if (!s.el.paused && !s.el.ended && t < s.duration) {
         t = s.el.currentTime;
         state.t0 = now() - t * 1000;
@@ -193,12 +198,12 @@
     if (state.exporting) {
       const p = Math.min(1, t / total);
       ui.busyBar.style.width = (p * 100).toFixed(1) + '%';
-      ui.busyText.textContent = `Рендер ${state.exporting.label}… ${Math.round(p * 100)}%`;
+      ui.busyText.textContent = `Rendering ${state.exporting.label}… ${Math.round(p * 100)}%`;
     }
   }
   const fmt = (x) => { x = Math.max(0, x); const m = Math.floor(x / 60), s = Math.floor(x % 60); return `${m}:${String(s).padStart(2, '0')}`; };
 
-  // ---------- размеры ----------
+  // ---------- sizes ----------
   function outSize(short) {
     const s = state.src;
     if (!s) return [0, 0];
@@ -209,13 +214,13 @@
   function setCanvasSize(short) {
     const [w, h] = outSize(short);
     ui.view.width = w; ui.view.height = h;
-    // холст сам становится горизонтальным / вертикальным / квадратным под файл
+    // stage becomes landscape / portrait / square to match the file
     ui.stage.style.aspectRatio = `${w} / ${h}`;
     ui.stage.style.width = `min(100%, 960px, calc(72vh * ${(w / h).toFixed(4)}))`;
   }
   function orientation() {
     const { w, h } = state.src;
-    return w > h ? 'горизонталь' : w < h ? 'вертикаль' : 'квадрат';
+    return w > h ? 'landscape' : w < h ? 'portrait' : 'square';
   }
   function previewShort() {
     const q = +ui.quality.value || Math.min(state.src.w, state.src.h);
@@ -224,11 +229,11 @@
   function updateMeta() {
     if (!state.src) return;
     const [w, h] = outSize(+ui.quality.value);
-    const kind = { video: 'видео', image: 'фото', gif: 'GIF' }[state.src.kind];
+    const kind = { video: 'video', image: 'photo', gif: 'GIF' }[state.src.kind];
     ui.meta.textContent = `${kind} · ${orientation()} · ${state.src.w}×${state.src.h} → ${w}×${h}`;
   }
 
-  // ---------- загрузка медиа ----------
+  // ---------- media loading ----------
   async function loadSource(file) {
     if (!file || state.exporting) return;
     const url = URL.createObjectURL(file);
@@ -237,9 +242,9 @@
       if (file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|m4v|ogv)$/i.test(file.name)) {
         const v = document.createElement('video');
         v.src = url; v.playsInline = true; v.preload = 'auto'; v.crossOrigin = 'anonymous';
-        await new Promise((ok, fail) => { v.onloadeddata = ok; v.onerror = () => fail(new Error('видео не читается')); });
+        await new Promise((ok, fail) => { v.onloadeddata = ok; v.onerror = () => fail(new Error('cannot read video')); });
         if (!isFinite(v.duration)) {
-          // у WebM из записей экрана длина неизвестна — перематываем в конец, чтобы браузер её посчитал
+          // screen-recorded WebM has unknown duration — seek to the end so the browser computes it
           v.currentTime = 1e9;
           await new Promise((ok) => { v.ondurationchange = () => isFinite(v.duration) && ok(); setTimeout(ok, 3000); });
           v.currentTime = 0;
@@ -254,7 +259,7 @@
         src = { kind: 'image', el: img, w: img.naturalWidth, h: img.naturalHeight, duration: IMAGE_SECONDS };
       }
     } catch (e) {
-      alert('Не получилось открыть файл: ' + e.message);
+      alert('Could not open file: ' + e.message);
       return;
     }
     if (state.src) disposeSource(state.src);
@@ -296,7 +301,7 @@
     URL.revokeObjectURL(s.url);
   }
 
-  // ---------- звук ----------
+  // ---------- audio ----------
   let ac = null, recDest = null;
   function audioCtx() {
     if (!ac) {
@@ -314,14 +319,14 @@
       node.connect(ctx.destination);
       node.connect(recDest);
       el._routed = true;
-    } catch { /* без звука */ }
+    } catch { /* no audio */ }
   }
 
-  // ---------- шаблоны / слои ----------
+  // ---------- templates / layers ----------
   function tplTile(tpl) {
     const b = document.createElement('button');
     b.className = 'tpl';
-    b.title = `Добавить «${tpl.name}»`;
+    b.title = `Add "${tpl.name}"`;
     const c = document.createElement('canvas');
     c.width = 200; c.height = 150;
     const v = document.createElement('video');
@@ -338,13 +343,16 @@
       x.drawImage(v, (cw - w) / 2, (ch - h) / 2, w, h);
       if (tpl.mode === 'key') {
         const d = x.getImageData(0, 0, cw, ch), p = d.data;
+        // same key as the shader
+        const sm = (e0, e1, v) => { const t = Math.min(1, Math.max(0, (v - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
         for (let i = 0; i < p.length; i += 4) {
-          const mx = Math.max(p[i], p[i + 2]), k = p[i + 1] - mx;
-          if (k > 10) { const a = Math.max(0, 1 - (k - 10) / 30); p[i] *= a; p[i + 1] = Math.min(p[i + 1], mx) * a; p[i + 2] *= a; p[i] += 11 * (1 - a); p[i + 1] += 11 * (1 - a); p[i + 2] += 11 * (1 - a); }
+          const mx = Math.max(p[i], p[i + 2]), k = (p[i + 1] - mx) / Math.max(p[i + 1], 2.5);
+          const a = (1 - sm(-0.02, 0.07, k)) * sm(51, 140, mx), bg = 11 * (1 - a);
+          p[i] = p[i] * a + bg; p[i + 1] = Math.min(p[i + 1], mx * 0.9) * a + bg; p[i + 2] = p[i + 2] * a + bg;
         }
         x.putImageData(d, 0, 0);
       }
-      // кадр из середины ролика — превью для слоя
+      // mid-clip frame used as the layer thumbnail
       if (!tpl.poster && v.currentTime > v.duration * 0.35) {
         tpl.poster = document.createElement('canvas');
         tpl.poster.width = cw; tpl.poster.height = ch;
@@ -366,8 +374,8 @@
     TEMPLATES.forEach((t) => ui.templates.append(tplTile(t)));
     const add = document.createElement('button');
     add.className = 'tpl custom';
-    add.innerHTML = `<div><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Свой шаблон</div>`;
-    add.title = 'Загрузить свой видео-шаблон (хромакей или на чёрном фоне)';
+    add.innerHTML = `<div><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Custom template</div>`;
+    add.title = 'Upload your own video template (green screen or black background)';
     add.onclick = () => ui.tplInput.click();
     ui.templates.append(add);
   }
@@ -379,7 +387,7 @@
     TEMPLATES.push(tpl);
     renderTemplates();
   }
-  // угадываем режим по углам кадра: зелёный → хромакей, тёмный → экран
+  // guess the mode from frame corners: green → chroma key, dark → screen
   async function guessMode(url) {
     const v = document.createElement('video');
     v.src = url; v.muted = true;
@@ -403,7 +411,7 @@
       id: ++layerSeq, tpl, video: v, tex: makeTex(), mode: tpl.mode,
       start: 0, opacity: 1, scale: 1, loop: false, duration: 1, thumb: null,
     };
-    // новый слой стартует с текущей позиции — удобно складывать эффекты друг за другом
+    // a new layer starts at the playhead — handy for chaining effects
     if (state.src) l.start = Math.round(Math.min(currentTime(), Math.max(0, totalDuration() - 0.5)) * 10) / 10;
     if (thumbCanvas) {
       l.thumb = document.createElement('canvas');
@@ -442,20 +450,20 @@
         <span class="idx">${i + 1}</span>
         <span class="thumb"></span>
         <span class="lname"></span>
-        <label class="field"><span>Старт <b data-o="start"></b></span><input type="range" data-k="start" min="0" max="${maxStart}" step="0.1"></label>
-        <label class="field"><span>Прозрачность <b data-o="opacity"></b></span><input type="range" data-k="opacity" min="0" max="1" step="0.01"></label>
-        <label class="field"><span>Размер <b data-o="scale"></b></span><input type="range" data-k="scale" min="0.3" max="2.5" step="0.05"></label>
-        <label class="field"><span>Режим</span><select data-k="mode">${Object.entries(MODES).map(([k, n]) => `<option value="${k}">${n}</option>`).join('')}</select></label>
+        <label class="field"><span>Start <b data-o="start"></b></span><input type="range" data-k="start" min="0" max="${maxStart}" step="0.1"></label>
+        <label class="field"><span>Opacity <b data-o="opacity"></b></span><input type="range" data-k="opacity" min="0" max="1" step="0.01"></label>
+        <label class="field"><span>Size <b data-o="scale"></b></span><input type="range" data-k="scale" min="0.3" max="2.5" step="0.05"></label>
+        <label class="field"><span>Mode</span><select data-k="mode">${Object.entries(MODES).map(([k, n]) => `<option value="${k}">${n}</option>`).join('')}</select></label>
         <span class="actions">
-          <button class="mini${l.loop ? ' on' : ''}" data-a="loop" title="Повторять весь ролик">${ICON.loop}</button>
-          <button class="mini" data-a="up" title="Выше" ${i === 0 ? 'disabled' : ''}>${ICON.up}</button>
-          <button class="mini" data-a="down" title="Ниже" ${i === state.layers.length - 1 ? 'disabled' : ''}>${ICON.down}</button>
-          <button class="mini" data-a="del" title="Удалить">${ICON.del}</button>
+          <button class="mini${l.loop ? ' on' : ''}" data-a="loop" title="Loop through the whole clip">${ICON.loop}</button>
+          <button class="mini" data-a="up" title="Move up" ${i === 0 ? 'disabled' : ''}>${ICON.up}</button>
+          <button class="mini" data-a="down" title="Move down" ${i === state.layers.length - 1 ? 'disabled' : ''}>${ICON.down}</button>
+          <button class="mini" data-a="del" title="Remove">${ICON.del}</button>
         </span>`;
       li.querySelector('.lname').textContent = l.tpl.name;
       if (l.thumb) li.querySelector('.thumb').append(l.thumb);
       const out = () => {
-        li.querySelector('[data-o=start]').textContent = l.start.toFixed(1) + 'с';
+        li.querySelector('[data-o=start]').textContent = l.start.toFixed(1) + 's';
         li.querySelector('[data-o=opacity]').textContent = Math.round(l.opacity * 100) + '%';
         li.querySelector('[data-o=scale]').textContent = Math.round(l.scale * 100) + '%';
       };
@@ -483,12 +491,12 @@
     });
   }
   function updateTimeline() {
-    // длина ролика могла измениться — подтягиваем шкалу «Старт»
+    // clip length may have changed — update the Start slider range
     const max = Math.max(10, Math.ceil(totalDuration()));
     ui.layers.querySelectorAll('[data-k=start]').forEach((r) => (r.max = max));
   }
 
-  // ---------- экспорт ----------
+  // ---------- export ----------
   function pickMime() {
     const list = [
       'video/mp4;codecs=avc1.640033,mp4a.40.2',
@@ -524,17 +532,10 @@
     const short = +ui.quality.value;
 
     const format = ui.format.value;
-    if (format === 'mp3') return exportMp3();
-    // PNG — текущий кадр в выбранном качестве
-    if (format === 'png') {
-      setCanvasSize(short);
-      render(currentTime());
-      ui.view.toBlob((b) => { download(b, fileBase() + '.png'); setCanvasSize(previewShort()); }, 'image/png');
-      return;
-    }
+    if (format === 'gif') return exportGif(short);
 
     const mime = pickMime();
-    if (!mime) { alert('Браузер не умеет записывать видео. Попробуй Chrome, Edge или Firefox.'); return; }
+    if (!mime) { alert('Your browser cannot record video. Try Chrome, Edge or Firefox.'); return; }
     audioCtx();
     setCanvasSize(short);
     const [w, h] = [ui.view.width, ui.view.height];
@@ -560,10 +561,10 @@
 
     ui.busy.hidden = false;
     ui.busyBar.style.width = '0%';
-    ui.busyText.textContent = `Рендер ${label}…`;
+    ui.busyText.textContent = `Rendering ${label}…`;
     ui.exportBtn.disabled = true;
 
-    // ждём, пока всё перемотается в начало
+    // wait until everything has rewound to the start
     state.playing = false; updatePlayIcon();
     setTime(0);
     const vids = [s.kind === 'video' ? s.el : null, ...state.layers.map((l) => l.video)].filter(Boolean);
@@ -572,107 +573,100 @@
     state.playing = true; updatePlayIcon();
     setTime(0);
     if (s.kind === 'video') s.el.play().catch(() => {});
+    // a timer (not requestAnimationFrame) keeps recording even if the tab is hidden
+    state.exporting.timer = setInterval(step, 1000 / FPS);
+    // stop exactly when the video ends, even if timers are slowed down in a background tab
+    if (s.kind === 'video') s.el.addEventListener('ended', finishExport, { once: true });
   }
   function finishExport() {
     const job = state.exporting;
     if (!job || job.stopping) return;
     job.stopping = true;
+    clearInterval(job.timer);
     render(totalDuration() - 0.001);
-    setTimeout(() => job.rec.state !== 'inactive' && job.rec.stop(), 120);
+    const stop = () => job.rec.state !== 'inactive' && job.rec.stop();
+    if (document.hidden) stop(); else setTimeout(stop, 120);   // hidden tabs delay timers
     if (state.src.kind === 'video') state.src.el.pause();
     ui.exportBtn.disabled = false;
   }
 
-  // ---------- MP3: звук файла + звук эффектов, без записи в реальном времени ----------
-  let lamePromise = null;
-  function loadLame() {
-    lamePromise ||= new Promise((ok, fail) => {
-      const sc = document.createElement('script');
-      sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js';
-      sc.onload = ok;
-      sc.onerror = () => { lamePromise = null; fail(new Error('не загрузился MP3-кодировщик')); };
-      document.head.append(sc);
+
+  // ---------- GIF: frame-by-frame render, independent of device speed ----------
+  const GIF_FPS = 15;
+  let gifenc = null;
+  function seekTo(v, t) {
+    t = Math.max(0, Math.min(t, (v.duration || t) - 0.05));
+    if (Math.abs(v.currentTime - t) < 0.001 && v.readyState >= 2) return Promise.resolve();
+    return new Promise((ok) => {
+      const done = () => { clearTimeout(timer); ok(); };
+      const timer = setTimeout(done, 3000);
+      v.addEventListener('seeked', done, { once: true });
+      v.currentTime = t;
     });
-    return lamePromise;
   }
-  async function decodeAudio(blobOrUrl) {
-    try {
-      const buf = blobOrUrl instanceof Blob ? await blobOrUrl.arrayBuffer() : await fetch(blobOrUrl).then((r) => r.arrayBuffer());
-      return await audioCtx().decodeAudioData(buf);
-    } catch { return null; }
-  }
-  const hasSound = (b) => {
-    if (!b) return false;
-    const d = b.getChannelData(0);
-    for (let i = 0; i < d.length; i += 64) if (Math.abs(d[i]) > 1e-4) return true;
-    return false;
-  };
-  async function exportMp3() {
+  async function exportGif(short) {
     const s = state.src;
-    const RATE = 44100;
-    const dur = totalDuration();
     ui.busy.hidden = false;
-    ui.busyBar.style.width = '10%';
-    ui.busyText.textContent = 'Собираю звук…';
+    ui.busyBar.style.width = '0%';
+    ui.busyText.textContent = 'Preparing GIF…';
+    ui.exportBtn.disabled = true;
+    const job = { gif: true, cancelled: false };
+    state.exporting = job;
+    if (s.kind === 'video') s.el.pause();
+    state.layers.forEach((l) => l.video.pause());
     try {
-      const [, base, ...fx] = await Promise.all([
-        loadLame(),
-        s.kind === 'video' ? decodeAudio(s.file) : null,
-        ...state.layers.map((l) => decodeAudio(l.tpl.url)),
-      ]);
-      const parts = [];
-      if (hasSound(base)) parts.push({ buf: base, at: 0, gain: 1, loop: false });
-      state.layers.forEach((l, i) => hasSound(fx[i]) && parts.push({ buf: fx[i], at: l.start, gain: l.opacity, loop: l.loop }));
-      if (!parts.length) throw new Error('в файле и эффектах нет звука');
-
-      const off = new OfflineAudioContext(2, Math.ceil(dur * RATE), RATE);
-      for (const p of parts) {
-        for (let at = p.at; at < dur; at += p.buf.duration) {
-          const n = off.createBufferSource();
-          const g = off.createGain();
-          n.buffer = p.buf; g.gain.value = p.gain;
-          n.connect(g).connect(off.destination);
-          n.start(at);
-          if (!p.loop) break;
+      gifenc ||= await import('https://cdn.jsdelivr.net/npm/gifenc@1.0.3/+esm');
+      const { GIFEncoder, quantize, applyPalette } = gifenc;
+      setCanvasSize(short);
+      const w = ui.view.width, h = ui.view.height;
+      const grab = document.createElement('canvas');
+      grab.width = w; grab.height = h;
+      const gx = grab.getContext('2d', { willReadFrequently: true });
+      const enc = GIFEncoder();
+      const total = totalDuration();
+      const n = Math.max(1, Math.floor(total * GIF_FPS));
+      for (let i = 0; i < n && !job.cancelled; i++) {
+        const t = i / GIF_FPS;
+        const waits = [];
+        if (s.kind === 'video') waits.push(seekTo(s.el, t));
+        for (const l of state.layers) {
+          const local = layerLocal(l, t);
+          if (local >= 0 && local < l.duration - 0.05) waits.push(seekTo(l.video, local));
         }
+        await Promise.all(waits);
+        render(t);
+        gx.drawImage(ui.view, 0, 0);
+        const rgba = gx.getImageData(0, 0, w, h).data;
+        const palette = quantize(rgba, 256);
+        enc.writeFrame(applyPalette(rgba, palette), w, h, { palette, delay: 1000 / GIF_FPS });
+        ui.busyBar.style.width = (((i + 1) / n) * 100).toFixed(1) + '%';
+        ui.busyText.textContent = `GIF ${w}×${h}… ${Math.round(((i + 1) / n) * 100)}%`;
+        await new Promise((r) => setTimeout(r));
       }
-      ui.busyBar.style.width = '40%';
-      const mix = await off.startRendering();
-
-      ui.busyText.textContent = 'Кодирую MP3…';
-      const enc = new lamejs.Mp3Encoder(2, RATE, 192);
-      const toI16 = (f) => { const o = new Int16Array(f.length); for (let i = 0; i < f.length; i++) o[i] = Math.max(-1, Math.min(1, f[i])) * 0x7fff; return o; };
-      const L = toI16(mix.getChannelData(0)), R = toI16(mix.getChannelData(1));
-      const out = [];
-      const STEP = 1152 * 40;
-      for (let i = 0; i < L.length; i += STEP) {
-        const chunk = enc.encodeBuffer(L.subarray(i, i + STEP), R.subarray(i, i + STEP));
-        if (chunk.length) out.push(new Uint8Array(chunk));
-        if ((i / STEP) % 20 === 0) {
-          ui.busyBar.style.width = (40 + (i / L.length) * 60).toFixed(1) + '%';
-          await new Promise((r) => setTimeout(r));
-        }
-      }
-      out.push(new Uint8Array(enc.flush()));
-      download(new Blob(out, { type: 'audio/mpeg' }), `${s.name}_stuppid.mp3`);
+      enc.finish();
+      if (!job.cancelled) download(new Blob([enc.bytes()], { type: 'image/gif' }), `${fileBase()}.gif`);
     } catch (e) {
-      alert('Не получилось сохранить MP3: ' + e.message);
+      alert('Could not save GIF: ' + e.message);
     } finally {
+      state.exporting = null;
       ui.busy.hidden = true;
+      ui.exportBtn.disabled = false;
+      setCanvasSize(previewShort());
+      setTime(0);
+      if (s.kind === 'video' && state.playing) s.el.play().catch(() => {});
     }
   }
-
   ui.cancelBtn.onclick = () => {
     if (!state.exporting) return;
     state.exporting.cancelled = true;
-    finishExport();
+    if (!state.exporting.gif) finishExport();
   };
 
-  // ---------- управление ----------
+  // ---------- controls ----------
   function updatePlayIcon() {
     ui.icPlay.toggleAttribute('hidden', state.playing);
     ui.icPause.toggleAttribute('hidden', !state.playing);
-    ui.playBtn.setAttribute('aria-label', state.playing ? 'Пауза' : 'Играть');
+    ui.playBtn.setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
   }
   function togglePlay() {
     if (!state.src || state.exporting) return;
@@ -710,7 +704,6 @@
   ui.fileInput.onchange = () => { loadSource(ui.fileInput.files[0]); ui.fileInput.value = ''; };
   ui.tplInput.onchange = () => { if (ui.tplInput.files[0]) addCustomTemplate(ui.tplInput.files[0]); ui.tplInput.value = ''; };
   ui.quality.onchange = () => { if (state.src && !state.exporting) { setCanvasSize(previewShort()); updateMeta(); } };
-  ui.format.onchange = () => (ui.quality.disabled = ui.format.value === 'mp3');
   ui.exportBtn.onclick = startExport;
   ui.clearBtn.onclick = () => [...state.layers].forEach(removeLayer);
 
@@ -727,11 +720,8 @@
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space' && !/INPUT|SELECT|BUTTON/.test(e.target.tagName)) { e.preventDefault(); togglePlay(); }
   });
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && state.exporting) ui.busyText.textContent = 'Не сворачивай вкладку — запись идёт в реальном времени';
-  });
 
-  // ---------- звёзды ----------
+  // ---------- stars ----------
   (function stars() {
     const c = $('stars'), x = c.getContext('2d');
     let pts = [];
@@ -749,7 +739,7 @@
     let last = 0;
     const loop = (ts) => {
       requestAnimationFrame(loop);
-      if (ts - last < 50) return;          // ~20 к/с — звёздам хватит
+      if (ts - last < 50) return;          // ~20 fps is plenty for stars
       last = ts;
       x.clearRect(0, 0, innerWidth, innerHeight);
       for (const p of pts) {
