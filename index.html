@@ -40,10 +40,18 @@
         <svg id="icPause" viewBox="0 0 24 24"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg>
         <svg id="icPlay" viewBox="0 0 24 24" hidden><path d="M7 4.5v15l12-7.5z"/></svg>
       </button>
-      <div id="seek" class="seek"><i id="seekFill"></i></div>
       <span id="time" class="time">0:00 / 0:00</span>
       <span id="meta" class="meta"></span>
     </div>
+
+    <section id="timeline" class="timeline" hidden>
+      <div id="tl" class="tl"></div>
+      <p class="tl-hint">
+        <span><i class="sw media"></i>Media length — drag its right end</span>
+        <span><i class="sw span"></i>Effect on — drag it or its ends</span>
+        <span><i class="sw clip"></i>Burst — drag, stretch (longer = slower), add with “+ Burst” or a double-click, remove with Delete</span>
+      </p>
+    </section>
 
     <div class="controls">
       <button id="attachBtn" class="pill">

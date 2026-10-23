@@ -2,7 +2,11 @@
 
 Stack video effects on photos, videos (with sound) and GIFs right in your browser. Attach a file, drag and drop it, or paste it with Ctrl+V.
 
-- Unlimited effect layers: start time, opacity, size, speed (0.25×–3×), blend mode (normal / screen / add — the template background is always removed), repeat (endless loop by default or 1–10 times), order.
+- Timeline under the preview:
+  - **black bar** — media length (drag its right end; trims a video, sets the length of a photo or GIF),
+  - **blue bar** — where an effect is on (drag its name tab to move it, drag its ends to resize),
+  - **green boxes** — single bursts of the effect (drag to move, stretch an edge to make it slower or faster, add one with "+ Burst" or a double-click on its row, select + Delete to remove; overlapping bursts get their own sub-rows).
+- Unlimited effect layers: opacity, size, speed, blend mode (normal / screen / add — the template background is always removed), loop-fill button, order.
 - Landscape, portrait and square media are detected automatically; effects keep their proportions and stretch to cover the whole frame.
 - Save as MP4 (with the original audio) or GIF, from 144p to 4K — Original quality by default.
 - Custom templates: use "Custom template" with any video on a green or black background; the background is detected and removed automatically.

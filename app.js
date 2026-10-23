@@ -6,13 +6,14 @@
   // bg: the template background that is always removed — 'green' (green screen), 'black' or 'none'
   // mode: how the effect is blended over the media — 'normal', 'screen' or 'add'
   const TEMPLATES = [
-    { id: 'explosion', name: 'Explosion', url: 'explosion.mp4', bg: 'green', mode: 'normal' },
+    { id: 'explosion', name: 'Explosion', url: 'explosion.mp4', bg: 'black', mode: 'screen' },
     { id: 'lightning', name: 'Lightning', url: 'lightning.mp4', bg: 'black', mode: 'screen' },
   ];
-  const REPEATS = [0, 1, 2, 3, 5, 10];   // 0 = endless loop
   const MODES = { normal: 'Normal', screen: 'Screen', add: 'Add (glow)' };
   const PREVIEW_MAX = 720;      // preview short side
-  const IMAGE_SECONDS = 3;      // clip length for a photo without effects
+  const PHOTO_SECONDS = 5;      // default clip length for a photo
+  const MAX_SECONDS = 120;      // longest clip a photo / GIF can be stretched to
+  const MIN_CLIP = 0.1;         // shortest burst on the timeline, seconds
   const FPS = 30;
 
   const $ = (id) => document.getElementById(id);
@@ -20,7 +21,7 @@
     stage: $('stage'), view: $('view'), emptyBtn: $('emptyBtn'), dropHint: $('dropHint'),
     busy: $('busy'), busyText: $('busyText'), busyBar: $('busyBar'), cancelBtn: $('cancelBtn'),
     transport: $('transport'), playBtn: $('playBtn'), icPlay: $('icPlay'), icPause: $('icPause'),
-    seek: $('seek'), seekFill: $('seekFill'), time: $('time'), meta: $('meta'),
+    time: $('time'), meta: $('meta'), timeline: $('timeline'), tl: $('tl'),
     attachBtn: $('attachBtn'), quality: $('quality'), format: $('format'), exportBtn: $('exportBtn'),
     templates: $('templates'), layers: $('layers'), layerCount: $('layerCount'),
     noLayers: $('noLayers'), clearBtn: $('clearBtn'), fileInput: $('fileInput'), tplInput: $('tplInput'),
@@ -28,6 +29,7 @@
 
   const state = {
     src: null,          // { kind: 'video'|'image'|'gif', el, w, h, duration, frames, name }
+    length: PHOTO_SECONDS, // output length in seconds (the black bar)
     layers: [],
     playing: true,
     t0: 0,              // performance.now() at t=0
@@ -98,19 +100,40 @@
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  // ---------- time ----------
-  // one pass of an effect lasts duration / speed; repeat 0 means endless
-  const cycle = (l) => l.duration / l.speed;
-  // endless effects get whole passes (at least IMAGE_SECONDS long) so a photo clip loops seamlessly
-  const passes = (l) => l.repeat || Math.max(1, Math.ceil((IMAGE_SECONDS - l.start) / cycle(l) - 1e-6));
-  const fxEnd = () => state.layers.reduce((e, l) => Math.max(e, l.start + cycle(l) * passes(l)), 0);
-  function totalDuration() {
-    const s = state.src;
-    if (!s) return 0;
-    if (s.kind === 'video') return s.duration;
-    if (s.kind === 'gif') return Math.max(s.duration, fxEnd());
-    return state.layers.length ? fxEnd() : IMAGE_SECONDS;
+  // ---------- layers: a blue span with green bursts inside ----------
+  // layer.start / layer.end — where the effect is allowed (blue bar)
+  // layer.clips = [{ at, len }] — each burst plays the whole template once, stretched to len seconds (green boxes)
+  // layer.auto — bursts are laid back to back over the whole span; any manual burst edit turns it off
+  const burstLen = (l) => l.duration / l.speed;
+  function fill(l) {
+    const len = burstLen(l);
+    l.clips = [];
+    for (let at = l.start; at < l.end - 0.02; at += len) l.clips.push({ at, len });
   }
+  const sortClips = (l) => l.clips.sort((a, b) => a.at - b.at);
+  // which burst plays at time t, and where inside the template video it is
+  function layerAt(l, t) {
+    if (t < l.start || t >= l.end) return null;
+    let hit = null;
+    for (const c of l.clips) if (t >= c.at && t < c.at + c.len) hit = c;
+    if (!hit) return null;
+    const rate = l.duration / hit.len;
+    return { local: (t - hit.at) * rate, rate };
+  }
+  // output length (black bar); full-length effects keep covering the whole media
+  function setLength(len) {
+    const old = state.length;
+    state.length = len;
+    for (const l of state.layers) {
+      if (Math.abs(l.end - old) < 1e-3 || l.end > len) l.end = len;
+      if (l.start > len - MIN_CLIP) l.start = Math.max(0, len - MIN_CLIP);
+      if (l.auto) fill(l);
+    }
+  }
+  const maxLength = () => (state.src?.kind === 'video' ? state.src.duration : MAX_SECONDS);
+
+  // ---------- time ----------
+  const totalDuration = () => (state.src ? state.length : 0);
   const now = () => performance.now();
   function currentTime() {
     if (!state.playing) return state.pausedAt;
@@ -124,29 +147,20 @@
     for (const l of state.layers) syncLayer(l, t, true);
   }
 
-  // keep <video> in sync with the shared clock
-  function syncVideo(v, local, active, playing, force, rate = 1) {
-    if (!active) {
+  // keep each effect <video> in sync with the shared clock
+  function syncLayer(l, t, force) {
+    const v = l.video, at = layerAt(l, t);
+    if (!at || at.local >= l.duration) {
       if (!v.paused) v.pause();
-      if (local < 0 && v.currentTime > 0.01) v.currentTime = 0;
+      if (!at && !v.seeking && v.currentTime > 0.01) v.currentTime = 0;   // ready for the next burst
       return;
     }
+    const rate = Math.min(16, Math.max(0.0625, at.rate));
+    if (Math.abs(v.playbackRate - rate) > 1e-3) v.playbackRate = rate;
     // re-seek only when clearly off and not already seeking — avoids endless seeking at high speed
-    if (force || (!v.seeking && Math.abs(v.currentTime - local) > 0.25 * Math.max(1, rate))) v.currentTime = local;
-    if (playing && v.paused) v.play().catch(() => {});
-    if (!playing && !v.paused) v.pause();
-  }
-  // position inside the effect video (its own seconds): negative before start, Infinity after the last repeat
-  function layerLocal(l, t) {
-    const rel = t - l.start;
-    if (rel < 0) return rel;
-    if (l.repeat && rel >= cycle(l) * l.repeat) return Infinity;
-    return (rel % cycle(l)) * l.speed;
-  }
-  function syncLayer(l, t, force) {
-    const local = layerLocal(l, t);
-    if (l.video.playbackRate !== l.speed) l.video.playbackRate = l.speed;
-    syncVideo(l.video, local, local >= 0 && local < l.duration, state.playing, force, l.speed);
+    if (force || (!v.seeking && Math.abs(v.currentTime - at.local) > 0.25 * Math.max(1, rate))) v.currentTime = at.local;
+    if (state.playing && v.paused) v.play().catch(() => {});
+    if (!state.playing && !v.paused) v.pause();
   }
 
   // ---------- frame ----------
@@ -168,8 +182,8 @@
 
     const outA = W / H;
     for (const l of state.layers) {
-      const local = layerLocal(l, t);
-      if (local < 0 || local >= l.duration || l.video.readyState < 2) continue;
+      const at = layerAt(l, t);
+      if (!at || at.local >= l.duration || l.video.readyState < 2) continue;
       // auto fit: the effect keeps its proportions and is stretched to cover the whole frame
       const fa = l.video.videoWidth / l.video.videoHeight;
       let sx = 1, sy = 1;
@@ -204,7 +218,7 @@
     for (const l of state.layers) syncLayer(l, t, false);
     render(t);
 
-    ui.seekFill.style.width = (total ? Math.min(100, (t / total) * 100) : 0) + '%';
+    movePlayhead(t);
     ui.time.textContent = `${fmt(t)} / ${fmt(total)}`;
     if (state.exporting) {
       const p = Math.min(1, t / total);
@@ -267,7 +281,7 @@
         const img = new Image();
         img.src = url;
         await img.decode();
-        src = { kind: 'image', el: img, w: img.naturalWidth, h: img.naturalHeight, duration: IMAGE_SECONDS };
+        src = { kind: 'image', el: img, w: img.naturalWidth, h: img.naturalHeight, duration: PHOTO_SECONDS };
       }
     } catch (e) {
       alert('Could not open file: ' + e.message);
@@ -279,6 +293,7 @@
     src.file = file;
     state.src = src;
     if (src.kind === 'video') routeAudio(src.el);
+    setLength(src.duration);
 
     ui.emptyBtn.hidden = true;
     ui.view.hidden = false;
@@ -286,6 +301,7 @@
     ui.exportBtn.disabled = false;
     setCanvasSize(previewShort());
     updateMeta();
+    renderTimeline();
     state.playing = true; updatePlayIcon();
     setTime(0);
     if (src.kind === 'video') src.el.play().catch(() => {});
@@ -333,7 +349,7 @@
     } catch { /* no audio */ }
   }
 
-  // ---------- templates / layers ----------
+  // ---------- templates ----------
   function tplTile(tpl) {
     const b = document.createElement('button');
     b.className = 'tpl';
@@ -363,11 +379,15 @@
         }
         x.putImageData(d, 0, 0);
       }
-      // mid-clip frame used as the layer thumbnail
-      if (!tpl.poster && v.currentTime > v.duration * 0.35) {
-        tpl.poster = document.createElement('canvas');
-        tpl.poster.width = cw; tpl.poster.height = ch;
-        tpl.poster.getContext('2d').drawImage(c, 0, 0);
+      // brightest frame so far becomes the layer thumbnail
+      if (v.currentTime < v.duration * 0.6) {
+        const p = x.getImageData(cw >> 1, ch >> 1, 1, 1).data, light = p[0] + p[1] + p[2];
+        if (!tpl.poster || light > tpl.posterLight) {
+          tpl.poster ||= document.createElement('canvas');
+          tpl.poster.width = cw; tpl.poster.height = ch;
+          tpl.poster.getContext('2d').drawImage(c, 0, 0);
+          tpl.posterLight = light;
+        }
       }
     };
     requestAnimationFrame(draw);
@@ -415,31 +435,42 @@
     return 'none';
   }
 
+  // ---------- layer list ----------
   function addLayer(tpl, thumbCanvas) {
     const v = document.createElement('video');
     v.src = tpl.url; v.playsInline = true; v.preload = 'auto'; v.crossOrigin = 'anonymous';
     const l = {
       id: ++layerSeq, tpl, video: v, tex: makeTex(), mode: tpl.mode,
-      start: 0, opacity: 1, scale: 1, speed: 1, repeat: 0, duration: 1, thumb: null,
+      opacity: 1, scale: 1, speed: 1, duration: 1,
+      start: 0, end: state.length, clips: [], auto: true, thumb: null, thumbUrl: '',
     };
     if (thumbCanvas) {
       l.thumb = document.createElement('canvas');
       l.thumb.width = 108; l.thumb.height = 72;
       l.thumb.getContext('2d').drawImage(thumbCanvas, 0, 0, 108, 72);
+      l.thumbUrl = l.thumb.toDataURL('image/jpeg', 0.7);
     }
-    v.addEventListener('loadedmetadata', () => { l.duration = v.duration || 1; renderLayers(); });
+    v.addEventListener('loadedmetadata', () => {
+      l.duration = v.duration || 1;
+      if (l.auto) fill(l); else l.clips.forEach((c) => (c.len = burstLen(l)));
+      renderAll();
+    });
     v.addEventListener('loadeddata', () => routeAudio(v), { once: true });
+    fill(l);
     state.layers.push(l);
-    renderLayers();
+    renderAll();
   }
   function removeLayer(l) {
     l.video.pause(); l.video.removeAttribute('src'); l.video.load();
     gl.deleteTexture(l.tex);
     state.layers = state.layers.filter((x) => x !== l);
-    renderLayers();
+    if (TL.sel?.l === l) TL.sel = null;
+    renderAll();
   }
+  function renderAll() { renderLayers(); renderTimeline(); }
 
   const ICON = {
+    fill: '<svg viewBox="0 0 24 24"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg>',
     up: '<svg viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6"/></svg>',
     down: '<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>',
     del: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
@@ -449,7 +480,6 @@
     ui.layerCount.textContent = state.layers.length;
     ui.noLayers.hidden = state.layers.length > 0;
     ui.clearBtn.hidden = state.layers.length === 0;
-    const maxStart = Math.max(10, Math.ceil(state.src ? totalDuration() : 10));
 
     state.layers.forEach((l, i) => {
       const li = document.createElement('li');
@@ -458,13 +488,12 @@
         <span class="idx">${i + 1}</span>
         <span class="thumb"></span>
         <span class="lname"></span>
-        <label class="field"><span>Start <b data-o="start"></b></span><input type="range" data-k="start" min="0" max="${maxStart}" step="0.1"></label>
         <label class="field"><span>Opacity <b data-o="opacity"></b></span><input type="range" data-k="opacity" min="0" max="1" step="0.01"></label>
         <label class="field"><span>Size <b data-o="scale"></b></span><input type="range" data-k="scale" min="0.3" max="2.5" step="0.05"></label>
         <label class="field"><span>Speed <b data-o="speed"></b></span><input type="range" data-k="speed" min="0.25" max="3" step="0.05"></label>
         <label class="field"><span>Mode</span><select data-k="mode">${Object.entries(MODES).map(([k, n]) => `<option value="${k}">${n}</option>`).join('')}</select></label>
-        <label class="field"><span>Repeat</span><select data-k="repeat">${REPEATS.map((n) => `<option value="${n}">${n ? n + '×' : '∞ Loop'}</option>`).join('')}</select></label>
         <span class="actions">
+          <button class="mini${l.auto ? ' on' : ''}" data-a="fill" title="Fill the blue bar with bursts back to back (endless loop)">${ICON.fill}</button>
           <button class="mini" data-a="up" title="Move up" ${i === 0 ? 'disabled' : ''}>${ICON.up}</button>
           <button class="mini" data-a="down" title="Move down" ${i === state.layers.length - 1 ? 'disabled' : ''}>${ICON.down}</button>
           <button class="mini" data-a="del" title="Remove">${ICON.del}</button>
@@ -472,7 +501,6 @@
       li.querySelector('.lname').textContent = l.tpl.name;
       if (l.thumb) li.querySelector('.thumb').append(l.thumb);
       const out = () => {
-        li.querySelector('[data-o=start]').textContent = l.start.toFixed(1) + 's';
         li.querySelector('[data-o=opacity]').textContent = Math.round(l.opacity * 100) + '%';
         li.querySelector('[data-o=scale]').textContent = Math.round(l.scale * 100) + '%';
         li.querySelector('[data-o=speed]').textContent = +l.speed.toFixed(2) + '×';
@@ -483,27 +511,243 @@
           const k = inp.dataset.k;
           l[k] = k === 'mode' ? inp.value : +inp.value;
           out();
-          if (k === 'start' || k === 'speed' || k === 'repeat') syncLayer(l, currentTime(), true);
+          if (k === 'speed') {
+            // speed = how long every burst lasts
+            if (l.auto) fill(l); else l.clips.forEach((c) => (c.len = burstLen(l)));
+            renderTimeline();
+            syncLayer(l, currentTime(), true);
+          }
         });
       });
-      li.querySelectorAll('[data-k=start], [data-k=speed], [data-k=repeat]').forEach((el) => el.addEventListener('change', updateTimeline));
       li.querySelector('.actions').addEventListener('click', (e) => {
         const a = e.target.closest('[data-a]')?.dataset.a;
         if (!a) return;
         if (a === 'del') return removeLayer(l);
+        if (a === 'fill') { l.auto = true; fill(l); syncLayer(l, currentTime(), true); return renderAll(); }
         const j = a === 'up' ? i - 1 : i + 1;
         [state.layers[i], state.layers[j]] = [state.layers[j], state.layers[i]];
-        renderLayers();
+        renderAll();
       });
       out();
       ui.layers.append(li);
     });
   }
-  function updateTimeline() {
-    // clip length may have changed — update the Start slider range
-    const max = Math.max(10, Math.ceil(totalDuration()));
-    ui.layers.querySelectorAll('[data-k=start]').forEach((r) => (r.max = max));
+
+  // ---------- timeline ----------
+  // black bar = media length; every effect gets its own group of rows:
+  // "Range" (blue bar = where the effect is on) and "Bursts" (green boxes, overlapping ones on sub-rows)
+  const LABEL = 112;                    // px reserved for row labels
+  const LANE_H = 26;                    // height of one burst sub-row
+  const TL = { view: 10, pps: 50, drag: null, sel: null };
+  function computeView() {
+    const s = state.src;
+    if (!s) return 10;
+    if (s.kind === 'video') return s.duration;
+    const end = Math.max(state.length, ...state.layers.map((l) => l.end));
+    return Math.min(MAX_SECONDS, Math.max(end * 1.25, end + 2));
   }
+  function tickStep(pps) {
+    return [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60].find((s) => s * pps >= 56) || 60;
+  }
+  const px = (t) => (t * TL.pps).toFixed(1) + 'px';
+  const esc = (t) => t.replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
+  function renderTimeline() {
+    if (!state.src) { ui.timeline.hidden = true; return; }
+    ui.timeline.hidden = false;
+    if (!TL.drag) TL.view = computeView();
+    const lane = Math.max(100, ui.tl.clientWidth - LABEL - 24);
+    TL.pps = lane / TL.view;
+    const step = tickStep(TL.pps);
+    let ticks = '';
+    for (let t = 0; t <= TL.view + 1e-6; t += step) {
+      ticks += `<span class="tl-tick" style="left:${px(t)}">${step < 1 ? t.toFixed(step < 0.5 ? 2 : 1) : Math.round(t)}s</span>`;
+    }
+    const media = { video: 'Video', image: 'Photo', gif: 'GIF' }[state.src.kind];
+    let rows = `
+      <div class="tl-row ruler"><div class="tl-label"></div><div class="tl-lane" data-drag="seek">${ticks}</div></div>
+      <div class="tl-row media"><div class="tl-label">${media}</div><div class="tl-lane" data-drag="seek">
+        <div class="tl-media" data-drag="seek" style="width:${px(state.length)}" title="Media length — drag the right end to change it">
+          <span class="tl-h r" data-drag="len" title="Drag to set the length"></span>
+          <span class="tl-len">${state.length.toFixed(1)}s</span>
+        </div></div></div>`;
+    state.layers.forEach((l, li) => {
+      // overlapping bursts go to separate sub-rows (kept as they are while dragging so nothing jumps)
+      const vis = l.clips.map((c, ci) => ({ c, ci, a: Math.max(c.at, l.start), b: Math.min(c.at + c.len, l.end) })).filter((v) => v.b - v.a > 0.001);
+      if (!TL.drag) {
+        const ends = [];
+        for (const v of [...vis].sort((p, q) => p.a - q.a)) {
+          let k = ends.findIndex((e) => e <= v.a + 1e-6);
+          if (k < 0) k = ends.length;
+          ends[k] = v.b;
+          v.c.lane = k;
+        }
+      }
+      const lanes = Math.max(1, ...vis.map((v) => (v.c.lane || 0) + 1));
+      let clips = '';
+      vis.forEach(({ c, ci, a, b }) => {
+        const sel = TL.sel && TL.sel.l === l && TL.sel.c === c;
+        const rate = l.duration / c.len;
+        clips += `<div class="tl-clip${sel ? ' sel' : ''}${a > c.at ? ' cut-l' : ''}${b < c.at + c.len ? ' cut-r' : ''}" data-drag="clip-move" data-l="${li}" data-c="${ci}"
+          style="left:${px(a)};width:${px(b - a)};top:${4 + (c.lane || 0) * LANE_H}px;height:${LANE_H - 4}px" title="Burst ${c.len.toFixed(2)}s (${+rate.toFixed(2)}×) — drag to move, drag edges to stretch">
+          <span class="tl-h l" data-drag="clip-l" data-l="${li}" data-c="${ci}"></span>
+          <span class="tl-rate">${+rate.toFixed(2)}×</span>
+          <span class="tl-h r" data-drag="clip-r" data-l="${li}" data-c="${ci}"></span>
+          ${sel ? `<button class="tl-x" data-act="del-clip" title="Delete burst (Delete key)">×</button>` : ''}
+        </div>`;
+      });
+      rows += `
+        <div class="tl-group">
+          <div class="tl-row range"><div class="tl-label">${l.thumbUrl ? `<img src="${l.thumbUrl}" alt="">` : ''}<span class="tl-name">${li + 1}. ${esc(l.tpl.name)}</span></div>
+            <div class="tl-lane" data-drag="seek">
+              <div class="tl-span" data-drag="span-move" data-l="${li}" style="left:${px(l.start)};width:${px(l.end - l.start)}"
+                title="Where ${esc(l.tpl.name)} is on — drag to move, drag the ends to resize">
+                <span class="tl-h l" data-drag="span-l" data-l="${li}"></span>
+                <span class="tl-span-txt">${(l.end - l.start).toFixed(1)}s</span>
+                <span class="tl-h r" data-drag="span-r" data-l="${li}"></span>
+              </div>
+            </div></div>
+          <div class="tl-row bursts" data-l="${li}" style="height:${8 + lanes * LANE_H}px">
+            <div class="tl-label"><span>Bursts</span><button class="tl-add" data-act="add-clip" data-l="${li}" title="Add a burst at the playhead">+ Burst</button></div>
+            <div class="tl-lane" data-drag="seek">
+              <div class="tl-zone" style="left:${px(l.start)};width:${px(l.end - l.start)}"></div>
+              ${clips}
+            </div></div>
+        </div>`;
+    });
+    ui.tl.innerHTML = rows + `<div class="tl-head" id="tlHead"></div>`;
+    movePlayhead(currentTime());
+  }
+  function movePlayhead(t) {
+    const head = ui.tl.querySelector('#tlHead');
+    if (head) head.style.left = `${LABEL + 12 + t * TL.pps - 1}px`;   // 12 = .tl padding
+  }
+
+  // snapping to nearby edges makes it easy to line bursts up
+  // skip: what is being dragged ('len', a layer's span, or a clip), so it never snaps to itself
+  function snap(t, skip) {
+    const pts = [0, currentTime()];
+    if (skip !== 'len') pts.push(state.length);
+    for (const x of state.layers) {
+      if (x !== skip) pts.push(x.start, x.end);
+      for (const c of x.clips) if (c !== skip) pts.push(c.at, c.at + c.len);
+    }
+    const tol = 8 / TL.pps;
+    let best = t, d = tol;
+    for (const p of pts) if (Math.abs(p - t) < d) { d = Math.abs(p - t); best = p; }
+    return best;
+  }
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  function laneTime(e) {
+    const lane = ui.tl.querySelector('.tl-lane');
+    return (e.clientX - lane.getBoundingClientRect().left) / TL.pps;
+  }
+
+  ui.tl.addEventListener('pointerdown', (e) => {
+    if (!state.src || state.exporting || e.button > 0) return;
+    const add = e.target.closest('[data-act=add-clip]');
+    if (add) {
+      const l = state.layers[+add.dataset.l];
+      return addBurst(l, clamp(currentTime(), l.start, l.end), true);
+    }
+    if (e.target.closest('[data-act=del-clip]')) {
+      const { l, c } = TL.sel;
+      l.clips = l.clips.filter((x) => x !== c); l.auto = false; TL.sel = null;
+      syncLayer(l, currentTime(), true);
+      return renderAll();
+    }
+    const ms = performance.now();
+    const dbl = TL.last && ms - TL.last.ms < 400 && Math.abs(e.clientX - TL.last.x) < 6;
+    TL.last = { ms, x: e.clientX };
+    if (dbl && addBurstAt(e)) { TL.last = null; return; }
+    const el = e.target.closest('[data-drag]');
+    if (!el) return;
+    const kind = el.dataset.drag;
+    const l = state.layers[+el.dataset.l];
+    const c = l && el.dataset.c != null ? l.clips[+el.dataset.c] : null;
+    TL.drag = {
+      kind, l, c, x0: e.clientX, moved: false,
+      len: state.length, start: l?.start, end: l?.end,
+      at: c?.at, clen: c?.len, clips: l?.clips.map((k) => ({ k, at: k.at })),
+    };
+    if (kind.startsWith('clip')) { TL.sel = { l, c }; renderTimeline(); }
+    else if (TL.sel) { TL.sel = null; renderTimeline(); }
+    if (kind === 'seek') seekTo_(laneTime(e));
+    try { ui.tl.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
+    e.preventDefault();
+  });
+  ui.tl.addEventListener('pointermove', (e) => {
+    const d = TL.drag;
+    if (!d) return;
+    const dt = (e.clientX - d.x0) / TL.pps;
+    if (Math.abs(e.clientX - d.x0) > 2) d.moved = true;
+    const { l, c } = d;
+    switch (d.kind) {
+      case 'seek': seekTo_(laneTime(e)); break;
+      case 'len': setLength(clamp(snap(d.len + dt, 'len'), 0.5, maxLength())); updateTime(); break;
+      case 'span-move': {
+        const k = clamp(dt, -d.start, state.length - d.end);
+        l.start = d.start + k; l.end = d.end + k;
+        d.clips.forEach((o) => (o.k.at = o.at + k));
+        break;
+      }
+      case 'span-l': l.start = clamp(snap(d.start + dt, l), 0, l.end - MIN_CLIP); if (l.auto) fill(l); break;
+      case 'span-r': l.end = clamp(snap(d.end + dt, l), l.start + MIN_CLIP, state.length); if (l.auto) fill(l); break;
+      case 'clip-move': {
+        const raw = d.at + dt, byLeft = snap(raw, c), byRight = snap(raw + c.len, c) - c.len;   // either edge may snap
+        c.at = Math.abs(byRight - raw) > 1e-9 && (byLeft === raw || Math.abs(byRight - raw) < Math.abs(byLeft - raw)) ? byRight : byLeft;
+        l.auto = false; break;
+      }
+      case 'clip-l': {
+        const end = d.at + d.clen;
+        const minLen = Math.max(MIN_CLIP, l.duration / 16);
+        c.at = Math.min(snap(d.at + dt, c), end - minLen); c.len = end - c.at; l.auto = false; break;
+      }
+      case 'clip-r': c.len = Math.max(Math.max(MIN_CLIP, l.duration / 16), snap(d.at + d.clen + dt, c) - d.at); l.auto = false; break;
+    }
+    if (d.kind !== 'seek') { if (l) syncLayer(l, currentTime(), true); renderTimeline(); }
+  });
+  const endDrag = () => {
+    const d = TL.drag;
+    if (!d) return;
+    TL.drag = null;
+    if (d.l) { sortClips(d.l); syncLayer(d.l, currentTime(), true); }
+    if (d.kind.startsWith('clip') || d.kind.startsWith('span')) renderLayers();   // the fill button reflects auto mode
+    renderTimeline();
+  };
+  ui.tl.addEventListener('pointerup', endDrag);
+  ui.tl.addEventListener('pointercancel', endDrag);
+  // double-click inside a blue bar (where there is no burst yet) adds a burst there.
+  // Detected from two quick presses: pointer capture keeps the browser from sending dblclick.
+  function addBurstAt(e) {
+    const hit = document.elementFromPoint(e.clientX, e.clientY);
+    const row = hit?.closest('.tl-row.bursts, .tl-row.range');
+    if (!row || hit.closest('.tl-clip, .tl-h, .tl-label')) return false;
+    const l = state.layers[+(row.dataset.l ?? row.nextElementSibling?.dataset.l)];
+    const t = laneTime(e);
+    if (!l || t < l.start || t > l.end) return false;
+    return addBurst(l, t);
+  }
+  // a new burst starts at t (button) or is centred on t (double-click), kept inside the blue range
+  function addBurst(l, t, fromStart = false) {
+    const len = burstLen(l);
+    const at = clamp(fromStart ? t : t - len / 2, l.start, Math.max(l.start, l.end - len));
+    const c = { at, len };
+    l.clips.push(c); sortClips(l); l.auto = false;
+    TL.sel = { l, c };
+    syncLayer(l, currentTime(), true);
+    renderAll();
+    return true;
+  }
+  function seekTo_(t) {
+    const total = totalDuration();
+    t = clamp(t, 0, total * 0.999);
+    setTime(t);
+    if (!state.playing) render(t);
+    movePlayhead(t);
+    updateTime();
+  }
+  const updateTime = () => { ui.time.textContent = `${fmt(currentTime())} / ${fmt(totalDuration())}`; };
+  addEventListener('resize', () => renderTimeline());
 
   // ---------- export ----------
   function pickMime() {
@@ -563,8 +807,8 @@
     const waits = [];
     if (s.kind === 'video') waits.push(seekTo(s.el, t));
     for (const l of state.layers) {
-      const local = layerLocal(l, t);
-      if (local >= 0 && local < l.duration - 0.05) waits.push(seekTo(l.video, local));
+      const at = layerAt(l, t);
+      if (at && at.local < l.duration - 0.05) waits.push(seekTo(l.video, at.local));
     }
     await Promise.all(waits);
     render(t);
@@ -632,7 +876,7 @@
     }
     return audioCache.get(src);
   }
-  // original sound + effect sounds (with their start, speed, repeats, opacity) mixed into one track
+  // original sound + the sound of every burst (stretched like its picture) mixed into one track
   async function mixAudio(total, rate) {
     const s = state.src;
     const base = s.kind === 'video' ? await decodeAudio(s.file) : null;
@@ -642,13 +886,15 @@
     if (base) { const n = off.createBufferSource(); n.buffer = base; n.connect(off.destination); n.start(0); }
     state.layers.forEach((l, i) => {
       if (!fx[i]) return;
-      for (let k = 0; !l.repeat || k < l.repeat; k++) {
-        const at = l.start + k * cycle(l);
-        if (at >= total) break;
+      for (const c of l.clips) {
+        const from = Math.max(c.at, l.start), to = Math.min(c.at + c.len, l.end, total);
+        if (to <= from) continue;
+        const speed = l.duration / c.len;
         const n = off.createBufferSource(), g = off.createGain();
-        n.buffer = fx[i]; n.playbackRate.value = l.speed; g.gain.value = l.opacity;
+        n.buffer = fx[i]; n.playbackRate.value = speed; g.gain.value = l.opacity;
         n.connect(g).connect(off.destination);
-        n.start(at);
+        n.start(from, (from - c.at) * speed);
+        n.stop(to);
       }
     });
     return off.startRendering();
@@ -826,17 +1072,6 @@
 
   ui.playBtn.onclick = togglePlay;
   ui.view.onclick = togglePlay;
-  ui.seek.addEventListener('pointerdown', (e) => {
-    if (!state.src || state.exporting) return;
-    const go = (ev) => {
-      const r = ui.seek.getBoundingClientRect();
-      setTime(Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * totalDuration() * 0.999);
-    };
-    go(e);
-    ui.seek.setPointerCapture(e.pointerId);
-    ui.seek.onpointermove = go;
-    ui.seek.onpointerup = () => (ui.seek.onpointermove = null);
-  });
 
   const pick = () => { audioCtx(); ui.fileInput.click(); };
   ui.attachBtn.onclick = pick;
@@ -869,7 +1104,15 @@
     loadSource(named);
   });
   window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' && !/INPUT|SELECT|BUTTON/.test(e.target.tagName)) { e.preventDefault(); togglePlay(); }
+    if (/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+    if (e.code === 'Space' && e.target.tagName !== 'BUTTON') { e.preventDefault(); togglePlay(); }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && TL.sel) {
+      e.preventDefault();
+      const { l, c } = TL.sel;
+      l.clips = l.clips.filter((x) => x !== c); l.auto = false; TL.sel = null;
+      syncLayer(l, currentTime(), true);
+      renderAll();
+    }
   });
 
   // ---------- stars ----------

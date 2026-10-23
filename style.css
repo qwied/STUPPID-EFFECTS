@@ -77,9 +77,72 @@ h1 {
 .transport { width: 100%; max-width: 960px; display: flex; align-items: center; gap: 12px; margin-top: -8px; }
 .icon-btn { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--surface); display: grid; place-items: center; cursor: pointer; flex: none; }
 .icon-btn svg { width: 15px; height: 15px; fill: currentColor; stroke: none; }
-.seek { flex: 1; height: 18px; display: flex; align-items: center; cursor: pointer; position: relative; }
-.seek::before { content: ""; position: absolute; left: 0; right: 0; height: 3px; background: #262626; border-radius: 3px; }
-.seek i { position: relative; height: 3px; background: #fff; border-radius: 3px; width: 0; }
+.transport .meta { margin-left: auto; }
+
+/* ---------- timeline: black = media length, blue = effect on, green = bursts ---------- */
+.timeline { width: 100%; max-width: 960px; margin-top: -10px; }
+.tl {
+  --media: #e8e8e8; --span: #1aa3e8; --clip: #22c55e;
+  position: relative; padding: 4px 12px 8px; border: 1px solid var(--line); border-radius: 16px;
+  background: rgba(8, 8, 8, .88); user-select: none; -webkit-user-select: none; touch-action: none; overflow: hidden;
+}
+.tl-row { display: flex; align-items: center; height: 34px; }
+.tl-row.ruler { height: 22px; }
+.tl-row.media { height: 32px; }
+.tl-label { width: 112px; flex: none; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); padding-right: 8px; min-width: 0; }
+.tl-label img { width: 30px; height: 20px; border-radius: 4px; object-fit: cover; flex: none; }
+.tl-name { color: #ddd; font-weight: 600; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tl-group { border-top: 1px solid #1d1d1d; margin-top: 4px; padding-top: 2px; }
+.tl-row.bursts { align-items: stretch; }
+.tl-row.bursts .tl-label { align-items: flex-start; padding-top: 6px; justify-content: space-between; }
+.tl-add {
+  border: 1px solid #22c55e66; background: #22c55e1a; color: #4ade80; border-radius: 6px;
+  font-size: 10px; font-weight: 600; padding: 2px 6px; cursor: pointer; white-space: nowrap;
+}
+.tl-add:hover { background: #22c55e33; }
+/* inside the blue range the bursts actually play; outside they are cut */
+.tl-zone { position: absolute; top: 0; bottom: 0; background: rgba(26, 163, 232, .06); border-left: 1px dashed #1aa3e866; border-right: 1px dashed #1aa3e866; pointer-events: none; }
+.tl-lane { position: relative; flex: 1; height: 100%; cursor: pointer; }
+.tl-tick { position: absolute; top: 2px; bottom: 0; border-left: 1px solid #2b2b2b; padding-left: 4px; font-size: 10px; color: #777; font-variant-numeric: tabular-nums; }
+.tl-media {
+  position: absolute; left: 0; top: 50%; height: 14px; transform: translateY(-50%);
+  background: #000; border: 2px solid var(--media); border-radius: 3px; color: var(--media);
+}
+.tl-len { position: absolute; right: 14px; top: -16px; font-size: 10px; color: #aaa; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tl-span {
+  position: absolute; top: 5px; bottom: 5px; z-index: 1;
+  border: 2px solid var(--span); background: rgba(26, 163, 232, .16); border-radius: 4px; color: var(--span); cursor: grab;
+  display: flex; align-items: center; justify-content: center;
+}
+.tl-span-txt { font-size: 10px; font-weight: 600; pointer-events: none; white-space: nowrap; overflow: hidden; }
+.tl-span .tl-h { width: 10px; } .tl-span .tl-h.l { left: -1px; } .tl-span .tl-h.r { right: -1px; }
+.tl-span .tl-h::after { left: 3px; }
+.tl-clip {
+  position: absolute; z-index: 2; min-width: 4px;
+  border: 2px solid var(--clip); background: rgba(34, 197, 94, .16); border-radius: 4px; color: var(--clip);
+  display: flex; align-items: center; justify-content: center; cursor: grab;
+}
+.tl-clip.cut-l { border-left-style: dashed; }
+.tl-clip.cut-r { border-right-style: dashed; }
+.tl-clip.sel { background: rgba(34, 197, 94, .38); box-shadow: 0 0 0 1px #fff; }
+.tl-rate { font-size: 10px; font-weight: 600; pointer-events: none; overflow: hidden; white-space: nowrap; }
+.tl-h { position: absolute; top: -2px; bottom: -2px; width: 12px; cursor: ew-resize; z-index: 4; }
+.tl-h::after { content: ""; position: absolute; left: 4px; top: 25%; bottom: 25%; width: 4px; border-radius: 2px; background: currentColor; }
+.tl-clip .tl-h { width: 9px; } .tl-clip .tl-h.l { left: -1px; } .tl-clip .tl-h.r { right: -1px; }   /* inside the burst, so neighbours never fight over a shared edge */
+.tl-clip .tl-h::after { left: 2px; }
+.tl-media .tl-h.r { right: -8px; top: -8px; bottom: -8px; }
+.tl-x {
+  position: absolute; top: -9px; right: -9px; width: 18px; height: 18px; z-index: 4; padding: 0;
+  border: 0; border-radius: 50%; background: #fff; color: #000; font-size: 13px; line-height: 18px; cursor: pointer;
+}
+.tl-head { position: absolute; top: 8px; bottom: 6px; width: 2px; background: #fff; z-index: 5; pointer-events: none; box-shadow: 0 0 6px rgba(255, 255, 255, .5); }
+.tl-head::before { content: ""; position: absolute; top: -6px; left: -5px; border: 6px solid transparent; border-top-color: #fff; }
+.tl-hint { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 8px 4px 0; font-size: 12px; color: var(--muted); }
+.tl-hint span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 18px; height: 10px; border-radius: 2px; display: inline-block; }
+.sw.media { background: #000; border: 2px solid #e8e8e8; }
+.sw.span { background: rgba(26, 163, 232, .13); border: 2px solid #1aa3e8; }
+.sw.clip { background: rgba(34, 197, 94, .16); border: 2px solid #22c55e; }
 .time, .meta { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* ---------- controls ---------- */
@@ -137,7 +200,7 @@ h2 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .04em; text-t
 
 .layers { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .layer {
-  display: grid; grid-template-columns: 20px 54px minmax(70px, 1fr) repeat(4, minmax(80px, 1fr)) 96px 84px auto;
+  display: grid; grid-template-columns: 20px 54px minmax(70px, 1fr) repeat(3, minmax(90px, 1fr)) 110px auto;
   align-items: center; gap: 12px;
   padding: 8px 10px; border: 1px solid var(--line); border-radius: 14px; background: rgba(10,10,10,.85);
 }
