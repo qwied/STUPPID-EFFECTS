@@ -1,15 +1,16 @@
-/* STUPPID EFECTS — everything renders in the browser (WebGL + MediaRecorder). */
+/* STUPPID EFECTS — everything renders in the browser (WebGL + WebCodecs). */
 (() => {
   'use strict';
 
   // ---------- templates ----------
-  // mode: 'key' — green screen, 'screen' — bright on black, 'normal' — plain overlay
+  // bg: the template background that is always removed — 'green' (green screen), 'black' or 'none'
+  // mode: how the effect is blended over the media — 'normal', 'screen' or 'add'
   const TEMPLATES = [
-    { id: 'explosion', name: 'Explosion', url: 'explosion.mp4', mode: 'key' },
-    { id: 'lightning', name: 'Lightning', url: 'lightning.mp4', mode: 'screen' },
+    { id: 'explosion', name: 'Explosion', url: 'explosion.mp4', bg: 'green', mode: 'normal' },
+    { id: 'lightning', name: 'Lightning', url: 'lightning.mp4', bg: 'black', mode: 'screen' },
   ];
   const REPEATS = [0, 1, 2, 3, 5, 10];   // 0 = endless loop
-  const MODES = { normal: 'Normal', key: 'Chroma key', screen: 'Screen' };
+  const MODES = { normal: 'Normal', screen: 'Screen', add: 'Add (glow)' };
   const PREVIEW_MAX = 720;      // preview short side
   const IMAGE_SECONDS = 3;      // clip length for a photo without effects
   const FPS = 30;
@@ -41,22 +42,22 @@
 
   const VS = `attribute vec2 p; uniform vec2 s; varying vec2 uv;
     void main(){ uv = p*0.5+0.5; gl_Position = vec4(p*s, 0.0, 1.0); }`;
-  const FS = `precision mediump float; varying vec2 uv; uniform sampler2D t; uniform int m; uniform float o;
+  // output is premultiplied: the removed background ends up as (0,0,0,0) in every blend mode
+  const FS = `precision mediump float; varying vec2 uv; uniform sampler2D t; uniform int k; uniform float o;
     void main(){
       vec4 c = texture2D(t, uv);
-      if (m == 1) {                                   // chroma key
+      float a = 1.0;
+      if (k == 1) {                                   // green screen
         float mx = max(c.r, c.b);
-        float k = (c.g - mx) / max(c.g, 0.01);        // share of excess green
-        float a = (1.0 - smoothstep(-0.02, 0.07, k))  // green and green mixes become transparent
-                * smoothstep(0.2, 0.55, mx);          // so do dim olive leftovers
+        float g = (c.g - mx) / max(c.g, 0.01);        // share of excess green
+        a = (1.0 - smoothstep(-0.02, 0.07, g))        // green and green mixes become transparent
+          * smoothstep(0.2, 0.55, mx);                // so do dim olive leftovers
         c.g = min(c.g, mx * 0.9);                     // push remaining green spill to orange
-        a *= o;
-        gl_FragColor = vec4(c.rgb * a, a);
-      } else if (m == 2) {                            // screen
-        gl_FragColor = vec4(c.rgb * o, 1.0);
-      } else {
-        gl_FragColor = vec4(c.rgb * o, o);
+        c.rgb *= a;
+      } else if (k == 2) {                            // black background: light on black is already premultiplied
+        a = max(c.r, max(c.g, c.b));                  // brightness is opacity, so dark glow never darkens the media
       }
+      gl_FragColor = vec4(c.rgb, a) * o;
     }`;
   function shader(type, src) {
     const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
@@ -71,7 +72,7 @@
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
   const aP = gl.getAttribLocation(prog, 'p');
   gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP, 2, gl.FLOAT, false, 0, 0);
-  const uS = gl.getUniformLocation(prog, 's'), uM = gl.getUniformLocation(prog, 'm'), uO = gl.getUniformLocation(prog, 'o');
+  const uS = gl.getUniformLocation(prog, 's'), uK = gl.getUniformLocation(prog, 'k'), uO = gl.getUniformLocation(prog, 'o');
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
   gl.enable(gl.BLEND);
 
@@ -86,26 +87,29 @@
   }
   const baseTex = makeTex();
 
-  function drawQuad(tex, source, mode, opacity, sx, sy) {
+  const BG = { none: 0, green: 1, black: 2 };
+  function drawQuad(tex, source, bg, mode, opacity, sx, sy) {
     gl.bindTexture(gl.TEXTURE_2D, tex);
     try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); } catch { return; }
-    const m = mode === 'key' ? 1 : mode === 'screen' ? 2 : 0;
-    if (m === 2) gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR);
+    if (mode === 'screen') gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR);
+    else if (mode === 'add') gl.blendFunc(gl.ONE, gl.ONE);
     else gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    gl.uniform1i(uM, m); gl.uniform1f(uO, opacity); gl.uniform2f(uS, sx, sy);
+    gl.uniform1i(uK, BG[bg] || 0); gl.uniform1f(uO, opacity); gl.uniform2f(uS, sx, sy);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
   // ---------- time ----------
   // one pass of an effect lasts duration / speed; repeat 0 means endless
   const cycle = (l) => l.duration / l.speed;
-  const fxEnd = () => state.layers.reduce((e, l) => Math.max(e, l.start + cycle(l) * (l.repeat || 1)), 0);
+  // endless effects get whole passes (at least IMAGE_SECONDS long) so a photo clip loops seamlessly
+  const passes = (l) => l.repeat || Math.max(1, Math.ceil((IMAGE_SECONDS - l.start) / cycle(l) - 1e-6));
+  const fxEnd = () => state.layers.reduce((e, l) => Math.max(e, l.start + cycle(l) * passes(l)), 0);
   function totalDuration() {
     const s = state.src;
     if (!s) return 0;
     if (s.kind === 'video') return s.duration;
     if (s.kind === 'gif') return Math.max(s.duration, fxEnd());
-    return Math.max(fxEnd(), IMAGE_SECONDS);
+    return state.layers.length ? fxEnd() : IMAGE_SECONDS;
   }
   const now = () => performance.now();
   function currentTime() {
@@ -121,13 +125,14 @@
   }
 
   // keep <video> in sync with the shared clock
-  function syncVideo(v, local, active, playing, force) {
+  function syncVideo(v, local, active, playing, force, rate = 1) {
     if (!active) {
       if (!v.paused) v.pause();
       if (local < 0 && v.currentTime > 0.01) v.currentTime = 0;
       return;
     }
-    if (force || Math.abs(v.currentTime - local) > 0.25) v.currentTime = local;
+    // re-seek only when clearly off and not already seeking — avoids endless seeking at high speed
+    if (force || (!v.seeking && Math.abs(v.currentTime - local) > 0.25 * Math.max(1, rate))) v.currentTime = local;
     if (playing && v.paused) v.play().catch(() => {});
     if (!playing && !v.paused) v.pause();
   }
@@ -141,7 +146,7 @@
   function syncLayer(l, t, force) {
     const local = layerLocal(l, t);
     if (l.video.playbackRate !== l.speed) l.video.playbackRate = l.speed;
-    syncVideo(l.video, local, local >= 0 && local < l.duration, state.playing, force);
+    syncVideo(l.video, local, local >= 0 && local < l.duration, state.playing, force, l.speed);
   }
 
   // ---------- frame ----------
@@ -159,7 +164,7 @@
       while (i < s.frames.length - 1 && x >= s.frames[i].d) { x -= s.frames[i].d; i++; }
       frame = s.frames[i].bmp;
     }
-    if (s.kind !== 'video' || s.el.readyState >= 2) drawQuad(baseTex, frame, 'normal', 1, 1, 1);
+    if (s.kind !== 'video' || s.el.readyState >= 2) drawQuad(baseTex, frame, 'none', 'normal', 1, 1, 1);
 
     const outA = W / H;
     for (const l of state.layers) {
@@ -169,7 +174,7 @@
       const fa = l.video.videoWidth / l.video.videoHeight;
       let sx = 1, sy = 1;
       if (fa > outA) sx = fa / outA; else sy = outA / fa;
-      drawQuad(l.tex, l.video, l.mode, l.opacity, sx * l.scale, sy * l.scale);
+      drawQuad(l.tex, l.video, l.tpl.bg, l.mode, l.opacity, sx * l.scale, sy * l.scale);
     }
   }
 
@@ -347,7 +352,7 @@
       let w = cw, h = cw / va; if (h < ch) { h = ch; w = ch * va; }
       x.fillStyle = '#0b0b0b'; x.fillRect(0, 0, cw, ch);
       x.drawImage(v, (cw - w) / 2, (ch - h) / 2, w, h);
-      if (tpl.mode === 'key') {
+      if (tpl.bg === 'green') {
         const d = x.getImageData(0, 0, cw, ch), p = d.data;
         // same key as the shader
         const sm = (e0, e1, v) => { const t = Math.min(1, Math.max(0, (v - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
@@ -388,13 +393,13 @@
 
   async function addCustomTemplate(file) {
     const url = URL.createObjectURL(file);
-    const mode = await guessMode(url);
-    const tpl = { id: 'custom' + Date.now(), name: file.name.replace(/\.[^.]+$/, '').slice(0, 24), url, mode };
+    const bg = await guessBackground(url);
+    const tpl = { id: 'custom' + Date.now(), name: file.name.replace(/\.[^.]+$/, '').slice(0, 24), url, bg, mode: bg === 'black' ? 'screen' : 'normal' };
     TEMPLATES.push(tpl);
     renderTemplates();
   }
-  // guess the mode from frame corners: green → chroma key, dark → screen
-  async function guessMode(url) {
+  // guess the background from the frame corners: green screen, black, or none
+  async function guessBackground(url) {
     const v = document.createElement('video');
     v.src = url; v.muted = true;
     try {
@@ -404,10 +409,10 @@
       const c = document.createElement('canvas'); c.width = 32; c.height = 32;
       const x = c.getContext('2d'); x.drawImage(v, 0, 0, 32, 32);
       const px = [[0, 0], [31, 0], [0, 31], [31, 31]].map(([a, b]) => x.getImageData(a, b, 1, 1).data);
-      if (px.filter((p) => p[1] > 90 && p[1] - Math.max(p[0], p[2]) > 50).length >= 2) return 'key';
-      if (px.filter((p) => p[0] + p[1] + p[2] < 60).length >= 2) return 'screen';
+      if (px.filter((p) => p[1] > 60 && p[1] - Math.max(p[0], p[2]) > 40).length >= 2) return 'green';
+      if (px.filter((p) => p[0] + p[1] + p[2] < 60).length >= 2) return 'black';
     } catch { /* ignore */ }
-    return 'normal';
+    return 'none';
   }
 
   function addLayer(tpl, thumbCanvas) {
@@ -541,6 +546,8 @@
   }
 
   // ---------- frame-by-frame rendering (shared by MP4 and GIF) ----------
+  // lets the page repaint between frames; unlike setTimeout it is not slowed down in background tabs
+  const yieldUI = () => new Promise((r) => { const ch = new MessageChannel(); ch.port1.onmessage = () => r(); ch.port2.postMessage(0); });
   function seekTo(v, t) {
     t = Math.max(0, Math.min(t, (v.duration || t) - 0.05));
     if (Math.abs(v.currentTime - t) < 0.001 && v.readyState >= 2) return Promise.resolve();
@@ -693,9 +700,9 @@
         const frame = new VideoFrame(ui.view, { timestamp: Math.round((i / FPS) * 1e6), duration: Math.round(1e6 / FPS) });
         venc.encode(frame, { keyFrame: i % (FPS * 2) === 0 });
         frame.close();
-        while (venc.encodeQueueSize > 6) await new Promise((r) => setTimeout(r, 4));
+        while (venc.encodeQueueSize > 6) await new Promise((r) => venc.addEventListener('dequeue', r, { once: true }));
         progress(label, i, n);
-        if (i % 4 === 0) await new Promise((r) => setTimeout(r));
+        if (i % 4 === 0) await yieldUI();
       }
       await venc.flush();
       if (failure) throw failure;
@@ -724,7 +731,7 @@
         const palette = quantize(rgba, 256);
         enc.writeFrame(applyPalette(rgba, palette), w, h, { palette, delay: 1000 / GIF_FPS });
         progress(`GIF ${w}×${h}`, i, n);
-        await new Promise((r) => setTimeout(r));
+        await yieldUI();
       }
       enc.finish();
       if (!job.cancelled) download(new Blob([enc.bytes()], { type: 'image/gif' }), `${fileBase()}.gif`);

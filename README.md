@@ -2,10 +2,10 @@
 
 Stack video effects on photos, videos (with sound) and GIFs right in your browser. Attach a file, drag and drop it, or paste it with Ctrl+V.
 
-- Unlimited effect layers: start time, opacity, size, speed (0.25×–3×), mode (chroma key / screen / normal), repeat (endless loop by default or 1–10 times), order.
-- Landscape, portrait and square media are detected automatically; effects rotate and stretch to cover the frame.
+- Unlimited effect layers: start time, opacity, size, speed (0.25×–3×), blend mode (normal / screen / add — the template background is always removed), repeat (endless loop by default or 1–10 times), order.
+- Landscape, portrait and square media are detected automatically; effects keep their proportions and stretch to cover the whole frame.
 - Save as MP4 (with the original audio) or GIF, from 144p to 4K — Original quality by default.
-- Custom templates: use "Custom template" with any video on a green or black background; the mode is detected automatically.
+- Custom templates: use "Custom template" with any video on a green or black background; the background is detected and removed automatically.
 - Nothing is uploaded to a server — everything runs on your device.
 
 ## Publish on GitHub Pages
@@ -19,7 +19,7 @@ Stack video effects on photos, videos (with sound) and GIFs right in your browse
 Put the video next to `index.html` and add a line at the top of `app.js`:
 
 ```js
-{ id: 'smoke', name: 'Smoke', url: 'smoke.mp4', mode: 'key' }, // key | screen | normal
+{ id: 'smoke', name: 'Smoke', url: 'smoke.mp4', bg: 'green', mode: 'normal' }, // bg: green | black | none; mode: normal | screen | add
 ```
 
 > MP4 and GIF are rendered frame by frame, so the result is smooth even on a slow device or a background tab.
