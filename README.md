@@ -1,8 +1,8 @@
 # STUPPID EFECTS
 
-Stack video effects on photos, videos (with sound) and GIFs right in your browser.
+Stack video effects on photos, videos (with sound) and GIFs right in your browser. Attach a file, drag and drop it, or paste it with Ctrl+V.
 
-- Unlimited effect layers: start time, opacity, size, mode (chroma key / screen / normal), loop, order.
+- Unlimited effect layers: start time, opacity, size, speed (0.25×–3×), mode (chroma key / screen / normal), repeat (endless loop by default or 1–10 times), order.
 - Landscape, portrait and square media are detected automatically; effects rotate and stretch to cover the frame.
 - Save as MP4 (with the original audio) or GIF, from 144p to 4K — Original quality by default.
 - Custom templates: use "Custom template" with any video on a green or black background; the mode is detected automatically.
@@ -22,4 +22,4 @@ Put the video next to `index.html` and add a line at the top of `app.js`:
 { id: 'smoke', name: 'Smoke', url: 'smoke.mp4', mode: 'key' }, // key | screen | normal
 ```
 
-> MP4 is recorded in real time: a 10-second clip takes about 10 seconds to save.
+> MP4 and GIF are rendered frame by frame, so the result is smooth even on a slow device or a background tab.

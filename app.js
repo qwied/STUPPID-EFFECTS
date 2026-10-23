@@ -8,6 +8,7 @@
     { id: 'explosion', name: 'Explosion', url: 'explosion.mp4', mode: 'key' },
     { id: 'lightning', name: 'Lightning', url: 'lightning.mp4', mode: 'screen' },
   ];
+  const REPEATS = [0, 1, 2, 3, 5, 10];   // 0 = endless loop
   const MODES = { normal: 'Normal', key: 'Chroma key', screen: 'Screen' };
   const PREVIEW_MAX = 720;      // preview short side
   const IMAGE_SECONDS = 3;      // clip length for a photo without effects
@@ -96,13 +97,15 @@
   }
 
   // ---------- time ----------
-  const fxEnd = () => state.layers.reduce((e, l) => Math.max(e, l.loop ? 0 : l.start + l.duration), 0);
+  // one pass of an effect lasts duration / speed; repeat 0 means endless
+  const cycle = (l) => l.duration / l.speed;
+  const fxEnd = () => state.layers.reduce((e, l) => Math.max(e, l.start + cycle(l) * (l.repeat || 1)), 0);
   function totalDuration() {
     const s = state.src;
     if (!s) return 0;
     if (s.kind === 'video') return s.duration;
     if (s.kind === 'gif') return Math.max(s.duration, fxEnd());
-    return Math.max(fxEnd(), state.layers.length ? 0 : IMAGE_SECONDS) || IMAGE_SECONDS;
+    return Math.max(fxEnd(), IMAGE_SECONDS);
   }
   const now = () => performance.now();
   function currentTime() {
@@ -128,13 +131,16 @@
     if (playing && v.paused) v.play().catch(() => {});
     if (!playing && !v.paused) v.pause();
   }
+  // position inside the effect video (its own seconds): negative before start, Infinity after the last repeat
   function layerLocal(l, t) {
-    let local = t - l.start;
-    if (l.loop && local >= 0) local %= l.duration;
-    return local;
+    const rel = t - l.start;
+    if (rel < 0) return rel;
+    if (l.repeat && rel >= cycle(l) * l.repeat) return Infinity;
+    return (rel % cycle(l)) * l.speed;
   }
   function syncLayer(l, t, force) {
     const local = layerLocal(l, t);
+    if (l.video.playbackRate !== l.speed) l.video.playbackRate = l.speed;
     syncVideo(l.video, local, local >= 0 && local < l.duration, state.playing, force);
   }
 
@@ -173,7 +179,7 @@
   }
   function step() {
     const s = state.src;
-    if (!s || state.exporting?.gif) return;   // GIF renders frame by frame itself
+    if (!s || state.exporting?.offline) return;   // MP4 / GIF render frame by frame themselves
     const total = totalDuration();
     let t = currentTime();
 
@@ -409,10 +415,8 @@
     v.src = tpl.url; v.playsInline = true; v.preload = 'auto'; v.crossOrigin = 'anonymous';
     const l = {
       id: ++layerSeq, tpl, video: v, tex: makeTex(), mode: tpl.mode,
-      start: 0, opacity: 1, scale: 1, loop: false, duration: 1, thumb: null,
+      start: 0, opacity: 1, scale: 1, speed: 1, repeat: 0, duration: 1, thumb: null,
     };
-    // a new layer starts at the playhead — handy for chaining effects
-    if (state.src) l.start = Math.round(Math.min(currentTime(), Math.max(0, totalDuration() - 0.5)) * 10) / 10;
     if (thumbCanvas) {
       l.thumb = document.createElement('canvas');
       l.thumb.width = 108; l.thumb.height = 72;
@@ -431,7 +435,6 @@
   }
 
   const ICON = {
-    loop: '<svg viewBox="0 0 24 24"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg>',
     up: '<svg viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6"/></svg>',
     down: '<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>',
     del: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
@@ -453,9 +456,10 @@
         <label class="field"><span>Start <b data-o="start"></b></span><input type="range" data-k="start" min="0" max="${maxStart}" step="0.1"></label>
         <label class="field"><span>Opacity <b data-o="opacity"></b></span><input type="range" data-k="opacity" min="0" max="1" step="0.01"></label>
         <label class="field"><span>Size <b data-o="scale"></b></span><input type="range" data-k="scale" min="0.3" max="2.5" step="0.05"></label>
+        <label class="field"><span>Speed <b data-o="speed"></b></span><input type="range" data-k="speed" min="0.25" max="3" step="0.05"></label>
         <label class="field"><span>Mode</span><select data-k="mode">${Object.entries(MODES).map(([k, n]) => `<option value="${k}">${n}</option>`).join('')}</select></label>
+        <label class="field"><span>Repeat</span><select data-k="repeat">${REPEATS.map((n) => `<option value="${n}">${n ? n + '×' : '∞ Loop'}</option>`).join('')}</select></label>
         <span class="actions">
-          <button class="mini${l.loop ? ' on' : ''}" data-a="loop" title="Loop through the whole clip">${ICON.loop}</button>
           <button class="mini" data-a="up" title="Move up" ${i === 0 ? 'disabled' : ''}>${ICON.up}</button>
           <button class="mini" data-a="down" title="Move down" ${i === state.layers.length - 1 ? 'disabled' : ''}>${ICON.down}</button>
           <button class="mini" data-a="del" title="Remove">${ICON.del}</button>
@@ -466,6 +470,7 @@
         li.querySelector('[data-o=start]').textContent = l.start.toFixed(1) + 's';
         li.querySelector('[data-o=opacity]').textContent = Math.round(l.opacity * 100) + '%';
         li.querySelector('[data-o=scale]').textContent = Math.round(l.scale * 100) + '%';
+        li.querySelector('[data-o=speed]').textContent = +l.speed.toFixed(2) + '×';
       };
       li.querySelectorAll('[data-k]').forEach((inp) => {
         inp.value = l[inp.dataset.k];
@@ -473,15 +478,14 @@
           const k = inp.dataset.k;
           l[k] = k === 'mode' ? inp.value : +inp.value;
           out();
-          if (k === 'start') syncLayer(l, currentTime(), true);
+          if (k === 'start' || k === 'speed' || k === 'repeat') syncLayer(l, currentTime(), true);
         });
       });
-      li.querySelector('[data-k=start]').addEventListener('change', () => updateTimeline());
+      li.querySelectorAll('[data-k=start], [data-k=speed], [data-k=repeat]').forEach((el) => el.addEventListener('change', updateTimeline));
       li.querySelector('.actions').addEventListener('click', (e) => {
         const a = e.target.closest('[data-a]')?.dataset.a;
         if (!a) return;
         if (a === 'del') return removeLayer(l);
-        if (a === 'loop') { l.loop = !l.loop; return renderLayers(); }
         const j = a === 'up' ? i - 1 : i + 1;
         [state.layers[i], state.layers[j]] = [state.layers[j], state.layers[i]];
         renderLayers();
@@ -530,10 +534,206 @@
     const s = state.src;
     if (!s || state.exporting) return;
     const short = +ui.quality.value;
+    if (ui.format.value === 'gif') return exportGif(short);
+    // frame-by-frame MP4 is smooth on any device; real-time recording is the fallback
+    if (await canEncodeMp4()) return exportMp4(short);
+    return recordRealtime(short);
+  }
 
-    const format = ui.format.value;
-    if (format === 'gif') return exportGif(short);
+  // ---------- frame-by-frame rendering (shared by MP4 and GIF) ----------
+  function seekTo(v, t) {
+    t = Math.max(0, Math.min(t, (v.duration || t) - 0.05));
+    if (Math.abs(v.currentTime - t) < 0.001 && v.readyState >= 2) return Promise.resolve();
+    return new Promise((ok) => {
+      const done = () => { clearTimeout(timer); ok(); };
+      const timer = setTimeout(done, 3000);
+      v.addEventListener('seeked', done, { once: true });
+      v.currentTime = t;
+    });
+  }
+  async function renderAt(t) {
+    const s = state.src;
+    const waits = [];
+    if (s.kind === 'video') waits.push(seekTo(s.el, t));
+    for (const l of state.layers) {
+      const local = layerLocal(l, t);
+      if (local >= 0 && local < l.duration - 0.05) waits.push(seekTo(l.video, local));
+    }
+    await Promise.all(waits);
+    render(t);
+  }
+  // runs work(job, w, h) with the canvas at export size and the preview stopped
+  async function offlineJob(short, title, work) {
+    const s = state.src;
+    const job = { offline: true, cancelled: false };
+    state.exporting = job;
+    ui.busy.hidden = false;
+    ui.busyBar.style.width = '0%';
+    ui.busyText.textContent = title;
+    ui.exportBtn.disabled = true;
+    if (s.kind === 'video') s.el.pause();
+    state.layers.forEach((l) => l.video.pause());
+    try {
+      setCanvasSize(short);
+      await work(job, ui.view.width, ui.view.height);
+    } catch (e) {
+      alert('Could not save the file: ' + e.message);
+    } finally {
+      state.exporting = null;
+      ui.busy.hidden = true;
+      ui.exportBtn.disabled = false;
+      setCanvasSize(previewShort());
+      setTime(0);
+      if (s.kind === 'video' && state.playing) s.el.play().catch(() => {});
+    }
+  }
+  function progress(label, i, n) {
+    ui.busyBar.style.width = (((i + 1) / n) * 100).toFixed(1) + '%';
+    ui.busyText.textContent = `${label}… ${Math.round(((i + 1) / n) * 100)}%`;
+  }
 
+  // ---------- MP4: WebCodecs H.264 + AAC ----------
+  const AVC = ['avc1.640034', 'avc1.640033', 'avc1.640028', 'avc1.4d0028', 'avc1.42e01f'];
+  let mp4mux = null;
+  async function pickAvc(w, h) {
+    for (const codec of AVC) {
+      const cfg = { codec, width: w, height: h, bitrate: bitrateFor(w, h), framerate: FPS, avc: { format: 'avc' } };
+      try { if ((await VideoEncoder.isConfigSupported(cfg)).supported) return cfg; } catch { /* try next */ }
+    }
+    return null;
+  }
+  async function canEncodeMp4() {
+    if (!('VideoEncoder' in window) || !('VideoFrame' in window)) return false;
+    try { mp4mux ||= await import('https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/+esm'); } catch { return false; }
+    const [w, h] = outSize(+ui.quality.value);
+    return !!(await pickAvc(w, h));
+  }
+
+  // decoded audio of a file or URL, or null when it has none
+  const audioCache = new Map();
+  function decodeAudio(src) {
+    if (!audioCache.has(src)) {
+      audioCache.set(src, (async () => {
+        try {
+          const buf = src instanceof Blob ? await src.arrayBuffer() : await fetch(src).then((r) => r.arrayBuffer());
+          const b = await audioCtx().decodeAudioData(buf);
+          const d = b.getChannelData(0);
+          for (let i = 0; i < d.length; i += 64) if (Math.abs(d[i]) > 1e-4) return b;
+        } catch { /* no audio track */ }
+        return null;
+      })());
+    }
+    return audioCache.get(src);
+  }
+  // original sound + effect sounds (with their start, speed, repeats, opacity) mixed into one track
+  async function mixAudio(total, rate) {
+    const s = state.src;
+    const base = s.kind === 'video' ? await decodeAudio(s.file) : null;
+    const fx = await Promise.all(state.layers.map((l) => decodeAudio(l.tpl.url)));
+    if (!base && !fx.some(Boolean)) return null;
+    const off = new OfflineAudioContext(2, Math.ceil(total * rate), rate);
+    if (base) { const n = off.createBufferSource(); n.buffer = base; n.connect(off.destination); n.start(0); }
+    state.layers.forEach((l, i) => {
+      if (!fx[i]) return;
+      for (let k = 0; !l.repeat || k < l.repeat; k++) {
+        const at = l.start + k * cycle(l);
+        if (at >= total) break;
+        const n = off.createBufferSource(), g = off.createGain();
+        n.buffer = fx[i]; n.playbackRate.value = l.speed; g.gain.value = l.opacity;
+        n.connect(g).connect(off.destination);
+        n.start(at);
+      }
+    });
+    return off.startRendering();
+  }
+  async function pickAudio(rate) {
+    for (const codec of ['mp4a.40.2', 'opus']) {
+      const cfg = { codec, sampleRate: rate, numberOfChannels: 2, bitrate: 192000 };
+      try { if ('AudioEncoder' in window && (await AudioEncoder.isConfigSupported(cfg)).supported) return cfg; } catch { /* try next */ }
+    }
+    return null;
+  }
+
+  function exportMp4(short) {
+    return offlineJob(short, 'Preparing MP4…', async (job, w, h) => {
+      const { Muxer, ArrayBufferTarget } = mp4mux;
+      const total = totalDuration();
+      const RATE = 48000;
+      const vcfg = await pickAvc(w, h);
+      const [mix, acfg] = await Promise.all([mixAudio(total, RATE), pickAudio(RATE)]);
+      const withAudio = mix && acfg;
+      const muxer = new Muxer({
+        target: new ArrayBufferTarget(),
+        video: { codec: 'avc', width: w, height: h, frameRate: FPS },
+        ...(withAudio ? { audio: { codec: acfg.codec === 'opus' ? 'opus' : 'aac', numberOfChannels: 2, sampleRate: RATE } } : {}),
+        fastStart: 'in-memory',
+      });
+      let failure = null;
+      const venc = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: (e) => (failure = e) });
+      venc.configure(vcfg);
+
+      if (withAudio) {
+        const aenc = new AudioEncoder({ output: (c, m) => muxer.addAudioChunk(c, m), error: (e) => (failure = e) });
+        aenc.configure(acfg);
+        const L = mix.getChannelData(0), R = mix.getChannelData(1), STEP = 4800;
+        for (let o = 0; o < L.length; o += STEP) {
+          const len = Math.min(STEP, L.length - o), data = new Float32Array(len * 2);
+          data.set(L.subarray(o, o + len), 0); data.set(R.subarray(o, o + len), len);
+          const ad = new AudioData({ format: 'f32-planar', sampleRate: RATE, numberOfFrames: len, numberOfChannels: 2, timestamp: Math.round((o / RATE) * 1e6), data });
+          aenc.encode(ad); ad.close();
+        }
+        await aenc.flush();
+      }
+
+      const n = Math.max(1, Math.round(total * FPS));
+      const label = `MP4 ${w}×${h}`;
+      for (let i = 0; i < n && !job.cancelled; i++) {
+        if (failure) throw failure;
+        await renderAt(i / FPS);
+        const frame = new VideoFrame(ui.view, { timestamp: Math.round((i / FPS) * 1e6), duration: Math.round(1e6 / FPS) });
+        venc.encode(frame, { keyFrame: i % (FPS * 2) === 0 });
+        frame.close();
+        while (venc.encodeQueueSize > 6) await new Promise((r) => setTimeout(r, 4));
+        progress(label, i, n);
+        if (i % 4 === 0) await new Promise((r) => setTimeout(r));
+      }
+      await venc.flush();
+      if (failure) throw failure;
+      if (job.cancelled) return;
+      muxer.finalize();
+      download(new Blob([muxer.target.buffer], { type: 'video/mp4' }), `${fileBase()}.mp4`);
+    });
+  }
+
+  // ---------- GIF ----------
+  const GIF_FPS = 15;
+  let gifenc = null;
+  function exportGif(short) {
+    return offlineJob(short, 'Preparing GIF…', async (job, w, h) => {
+      gifenc ||= await import('https://cdn.jsdelivr.net/npm/gifenc@1.0.3/+esm');
+      const { GIFEncoder, quantize, applyPalette } = gifenc;
+      const grab = document.createElement('canvas');
+      grab.width = w; grab.height = h;
+      const gx = grab.getContext('2d', { willReadFrequently: true });
+      const enc = GIFEncoder();
+      const n = Math.max(1, Math.floor(totalDuration() * GIF_FPS));
+      for (let i = 0; i < n && !job.cancelled; i++) {
+        await renderAt(i / GIF_FPS);
+        gx.drawImage(ui.view, 0, 0);
+        const rgba = gx.getImageData(0, 0, w, h).data;
+        const palette = quantize(rgba, 256);
+        enc.writeFrame(applyPalette(rgba, palette), w, h, { palette, delay: 1000 / GIF_FPS });
+        progress(`GIF ${w}×${h}`, i, n);
+        await new Promise((r) => setTimeout(r));
+      }
+      enc.finish();
+      if (!job.cancelled) download(new Blob([enc.bytes()], { type: 'image/gif' }), `${fileBase()}.gif`);
+    });
+  }
+
+  // ---------- real-time recording (fallback for browsers without WebCodecs) ----------
+  async function recordRealtime(short) {
+    const s = state.src;
     const mime = pickMime();
     if (!mime) { alert('Your browser cannot record video. Try Chrome, Edge or Firefox.'); return; }
     audioCtx();
@@ -589,77 +789,10 @@
     if (state.src.kind === 'video') state.src.el.pause();
     ui.exportBtn.disabled = false;
   }
-
-
-  // ---------- GIF: frame-by-frame render, independent of device speed ----------
-  const GIF_FPS = 15;
-  let gifenc = null;
-  function seekTo(v, t) {
-    t = Math.max(0, Math.min(t, (v.duration || t) - 0.05));
-    if (Math.abs(v.currentTime - t) < 0.001 && v.readyState >= 2) return Promise.resolve();
-    return new Promise((ok) => {
-      const done = () => { clearTimeout(timer); ok(); };
-      const timer = setTimeout(done, 3000);
-      v.addEventListener('seeked', done, { once: true });
-      v.currentTime = t;
-    });
-  }
-  async function exportGif(short) {
-    const s = state.src;
-    ui.busy.hidden = false;
-    ui.busyBar.style.width = '0%';
-    ui.busyText.textContent = 'Preparing GIF…';
-    ui.exportBtn.disabled = true;
-    const job = { gif: true, cancelled: false };
-    state.exporting = job;
-    if (s.kind === 'video') s.el.pause();
-    state.layers.forEach((l) => l.video.pause());
-    try {
-      gifenc ||= await import('https://cdn.jsdelivr.net/npm/gifenc@1.0.3/+esm');
-      const { GIFEncoder, quantize, applyPalette } = gifenc;
-      setCanvasSize(short);
-      const w = ui.view.width, h = ui.view.height;
-      const grab = document.createElement('canvas');
-      grab.width = w; grab.height = h;
-      const gx = grab.getContext('2d', { willReadFrequently: true });
-      const enc = GIFEncoder();
-      const total = totalDuration();
-      const n = Math.max(1, Math.floor(total * GIF_FPS));
-      for (let i = 0; i < n && !job.cancelled; i++) {
-        const t = i / GIF_FPS;
-        const waits = [];
-        if (s.kind === 'video') waits.push(seekTo(s.el, t));
-        for (const l of state.layers) {
-          const local = layerLocal(l, t);
-          if (local >= 0 && local < l.duration - 0.05) waits.push(seekTo(l.video, local));
-        }
-        await Promise.all(waits);
-        render(t);
-        gx.drawImage(ui.view, 0, 0);
-        const rgba = gx.getImageData(0, 0, w, h).data;
-        const palette = quantize(rgba, 256);
-        enc.writeFrame(applyPalette(rgba, palette), w, h, { palette, delay: 1000 / GIF_FPS });
-        ui.busyBar.style.width = (((i + 1) / n) * 100).toFixed(1) + '%';
-        ui.busyText.textContent = `GIF ${w}×${h}… ${Math.round(((i + 1) / n) * 100)}%`;
-        await new Promise((r) => setTimeout(r));
-      }
-      enc.finish();
-      if (!job.cancelled) download(new Blob([enc.bytes()], { type: 'image/gif' }), `${fileBase()}.gif`);
-    } catch (e) {
-      alert('Could not save GIF: ' + e.message);
-    } finally {
-      state.exporting = null;
-      ui.busy.hidden = true;
-      ui.exportBtn.disabled = false;
-      setCanvasSize(previewShort());
-      setTime(0);
-      if (s.kind === 'video' && state.playing) s.el.play().catch(() => {});
-    }
-  }
   ui.cancelBtn.onclick = () => {
     if (!state.exporting) return;
     state.exporting.cancelled = true;
-    if (!state.exporting.gif) finishExport();
+    if (!state.exporting.offline) finishExport();
   };
 
   // ---------- controls ----------
@@ -716,6 +849,17 @@
     e.preventDefault(); dragDepth = 0; ui.dropHint.hidden = true; ui.stage.classList.remove('drag');
     const f = e.dataTransfer.files[0];
     if (f) { audioCtx(); loadSource(f); }
+  });
+  // Ctrl+V: paste a copied file or a screenshot straight from the clipboard
+  window.addEventListener('paste', (e) => {
+    const item = [...(e.clipboardData?.items || [])].find((it) => it.kind === 'file' && /^(image|video)\//.test(it.type));
+    const file = item?.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    const ext = file.type.split('/')[1].replace('jpeg', 'jpg').replace('quicktime', 'mov');
+    const named = file.name && file.name !== 'image.png' ? file : new File([file], `pasted.${ext}`, { type: file.type });
+    audioCtx();
+    loadSource(named);
   });
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space' && !/INPUT|SELECT|BUTTON/.test(e.target.tagName)) { e.preventDefault(); togglePlay(); }

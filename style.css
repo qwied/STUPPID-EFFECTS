@@ -137,7 +137,7 @@ h2 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .04em; text-t
 
 .layers { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .layer {
-  display: grid; grid-template-columns: 26px 54px minmax(90px, 1fr) repeat(3, minmax(110px, 1.2fr)) 112px auto;
+  display: grid; grid-template-columns: 20px 54px minmax(70px, 1fr) repeat(4, minmax(80px, 1fr)) 96px 84px auto;
   align-items: center; gap: 12px;
   padding: 8px 10px; border: 1px solid var(--line); border-radius: 14px; background: rgba(10,10,10,.85);
 }
