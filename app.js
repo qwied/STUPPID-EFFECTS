@@ -9,6 +9,8 @@
     { id: 'explosion', name: 'Explosion', url: 'explosion.mp4', bg: 'black', mode: 'screen' },
     { id: 'lightning', name: 'Lightning', url: 'lightning.mp4', bg: 'black', mode: 'screen' },
   ];
+  // built-in processing effect (no template video): destroys picture and sound quality
+  const SHAKAL = { id: 'shakal', name: 'Shakal', kind: 'shakal' };
   const MODES = { normal: 'Normal', screen: 'Screen', add: 'Add (glow)' };
   const PREVIEW_MAX = 720;      // preview short side
   const PHOTO_SECONDS = 5;      // default clip length for a photo
@@ -61,6 +63,34 @@
       }
       gl_FragColor = vec4(c.rgb, a) * o;
     }`;
+  // Shakal: pixel blocks + JPEG-like macroblock smear + chroma bleed + deep-fry + banding + block noise.
+  // amt goes from 0 (clean) to 2 (destroyed); the low frame rate is done in shakalPass().
+  const SHAKAL_FS = `#ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
+    precision mediump float;
+    #endif
+    varying vec2 uv; uniform sampler2D t; uniform vec2 rs; uniform float amt; uniform float seed;
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233)) + seed) * 43758.5453); }
+    vec3 at(vec2 px) { return texture2D(t, clamp(px / rs, 0.0, 1.0)).rgb; }
+    void main() {
+      vec2 p = uv * rs;
+      float a = clamp(amt, 0.0, 1.0);
+      float blk = floor(1.0 + amt * amt * min(rs.x, rs.y) / 64.0);
+      vec2 cell = floor(p / blk);
+      vec3 col = at((cell + 0.5) * blk);
+      float mb = blk * 8.0; vec2 m0 = floor(p / mb) * mb;
+      vec3 avg = (at(m0 + mb * vec2(.25, .25)) + at(m0 + mb * vec2(.75, .25)) + at(m0 + mb * vec2(.25, .75)) + at(m0 + mb * vec2(.75, .75))) * .25;
+      col = mix(col, avg, a * 0.55);
+      vec3 cc = at((floor(p / (blk * 2.0)) + 0.5) * blk * 2.0);
+      float y = dot(col, vec3(.299, .587, .114)), yc = dot(cc, vec3(.299, .587, .114));
+      col = mix(col, clamp(cc - yc + y, 0.0, 1.0), a);
+      col = (col - 0.5) * (1.0 + amt * 0.7) + 0.5;
+      float l = dot(col, vec3(.299, .587, .114)); col = mix(vec3(l), col, 1.0 + amt * 1.1);
+      col += (hash(cell) - 0.5) * amt * 0.12;
+      float lv = max(2.0, mix(48.0, 7.0, a) - 2.5 * max(amt - 1.0, 0.0)); col = floor(clamp(col, 0.0, 1.0) * lv + 0.5) / lv;
+      gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+    }`;
   function shader(type, src) {
     const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
     if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
@@ -69,7 +99,16 @@
   const prog = gl.createProgram();
   gl.attachShader(prog, shader(gl.VERTEX_SHADER, VS));
   gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS));
-  gl.linkProgram(prog); gl.useProgram(prog);
+  gl.bindAttribLocation(prog, 0, 'p');
+  gl.linkProgram(prog);
+  const shakalProg = gl.createProgram();
+  gl.attachShader(shakalProg, shader(gl.VERTEX_SHADER, VS));
+  gl.attachShader(shakalProg, shader(gl.FRAGMENT_SHADER, SHAKAL_FS));
+  gl.bindAttribLocation(shakalProg, 0, 'p');
+  gl.linkProgram(shakalProg);
+  if (!gl.getProgramParameter(shakalProg, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(shakalProg));
+  const SK = { s: gl.getUniformLocation(shakalProg, 's'), rs: gl.getUniformLocation(shakalProg, 'rs'), amt: gl.getUniformLocation(shakalProg, 'amt'), seed: gl.getUniformLocation(shakalProg, 'seed') };
+  gl.useProgram(prog);
   gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
   const aP = gl.getAttribLocation(prog, 'p');
@@ -91,6 +130,7 @@
 
   const BG = { none: 0, green: 1, black: 2 };
   function drawQuad(tex, source, bg, mode, opacity, sx, sy) {
+    gl.useProgram(prog);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); } catch { return; }
     if (mode === 'screen') gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR);
@@ -99,6 +139,54 @@
     gl.uniform1i(uK, BG[bg] || 0); gl.uniform1f(uO, opacity); gl.uniform2f(uS, sx, sy);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
+
+  // ---------- Shakal (post-process): the frame is composed off-screen, crunched, then shown ----------
+  function makeTarget(w, h) {
+    const tex = makeTex();
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { tex, fb, w, h, stamp: -1 };
+  }
+  const freeTarget = (tg) => { if (tg) { gl.deleteFramebuffer(tg.fb); gl.deleteTexture(tg.tex); } };
+  let pingPong = [];
+  function targets(w, h) {
+    if (!pingPong.length || pingPong[0].w !== w || pingPong[0].h !== h) {
+      pingPong.forEach(freeTarget);
+      pingPong = [makeTarget(w, h), makeTarget(w, h)];
+    }
+    return pingPong;
+  }
+  // copies a texture onto the bound framebuffer as is
+  function drawTex(tex) {
+    gl.useProgram(prog);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.blendFunc(gl.ONE, gl.ZERO);
+    gl.uniform1i(uK, 0); gl.uniform1f(uO, 1); gl.uniform2f(uS, 1, 1);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  // one Shakal layer: crunches src into the layer's own frame, which is only refreshed at a low
+  // frame rate (the stutter of a bad stream), then copies that frame to dst
+  function shakalPass(l, src, dst, t, w, h) {
+    if (!l.cache || l.cache.w !== w || l.cache.h !== h) { freeTarget(l.cache); l.cache = makeTarget(w, h); }
+    const fps = Math.max(3, 30 - 25 * l.vq), stamp = Math.floor(t * fps + 1e-6);
+    if (l.cache.stamp !== stamp) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, l.cache.fb);
+      gl.useProgram(shakalProg);
+      gl.bindTexture(gl.TEXTURE_2D, src.tex);
+      gl.blendFunc(gl.ONE, gl.ZERO);
+      gl.uniform2f(SK.s, 1, 1); gl.uniform2f(SK.rs, w, h); gl.uniform1f(SK.amt, l.vq); gl.uniform1f(SK.seed, (stamp % 97) * 1.37);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      l.cache.stamp = stamp;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fb);
+    drawTex(l.cache.tex);
+  }
+  const shakalOn = (l, t) => l.kind === 'shakal' && t >= l.start && t < l.end;
+  // stacked Shakal layers add up (and can go past 100%)
+  const shakalAudioAt = (t) => Math.min(3, state.layers.reduce((a, l) => a + (shakalOn(l, t) ? l.aq : 0), 0));
 
   // ---------- layers: a blue span with green bursts inside ----------
   // layer.start / layer.end — where the effect is allowed (blue bar)
@@ -144,11 +232,12 @@
     state.pausedAt = t;
     const s = state.src;
     if (s && s.kind === 'video') s.el.currentTime = Math.min(t, s.duration);
-    for (const l of state.layers) syncLayer(l, t, true);
+    for (const l of state.layers) { syncLayer(l, t, true); if (l.cache) l.cache.stamp = -1; }
   }
 
   // keep each effect <video> in sync with the shared clock
   function syncLayer(l, t, force) {
+    if (l.kind) return;   // processing effects (Shakal) have no video of their own
     const v = l.video, at = layerAt(l, t);
     if (!at || at.local >= l.duration) {
       if (!v.paused) v.pause();
@@ -167,6 +256,10 @@
   function render(t) {
     const s = state.src;
     const W = ui.view.width, H = ui.view.height;
+    // Shakal is applied on top of everything (media + all effect layers), so compose off-screen first
+    const shakals = s ? state.layers.filter((l) => shakalOn(l, t) && l.vq > 0) : [];
+    const pp = shakals.length ? targets(W, H) : null;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, pp ? pp[0].fb : null);
     gl.viewport(0, 0, W, H);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -182,6 +275,7 @@
 
     const outA = W / H;
     for (const l of state.layers) {
+      if (l.kind) continue;
       const at = layerAt(l, t);
       if (!at || at.local >= l.duration || l.video.readyState < 2) continue;
       // auto fit: the effect keeps its proportions and is stretched to cover the whole frame
@@ -189,6 +283,15 @@
       let sx = 1, sy = 1;
       if (fa > outA) sx = fa / outA; else sy = outA / fa;
       drawQuad(l.tex, l.video, l.tpl.bg, l.mode, l.opacity, sx * l.scale, sy * l.scale);
+    }
+
+    if (pp) {
+      // every active Shakal layer crunches the result again (stacking = worse quality)
+      let cur = 0;
+      for (const l of shakals) { shakalPass(l, pp[cur], pp[1 - cur], t, W, H); cur = 1 - cur; }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, W, H);
+      drawTex(pp[cur].tex);
     }
   }
 
@@ -216,6 +319,7 @@
       if (s.kind === 'video' && state.playing) s.el.play().catch(() => {});
     }
     for (const l of state.layers) syncLayer(l, t, false);
+    liveShakal = shakalAudioAt(t);
     render(t);
 
     movePlayhead(t);
@@ -329,11 +433,62 @@
   }
 
   // ---------- audio ----------
-  let ac = null, recDest = null;
+  // Shakal sound: cheap-mic band (high-pass + low-pass), overdrive, bit crush and sample-rate drop.
+  // a = 0 leaves the sound untouched; 1 is a broken phone call; 2-3 is pure crunch.
+  function makeCrusher(rate) {
+    const ch = [0, 1].map(() => ({ lp: 0, hp: 0, prev: 0, held: 0, n: 0 }));
+    return (x, c, a) => {
+      const s = ch[c];
+      if (a <= 0.001) { s.prev = x; s.lp = x; s.hp = 0; s.n = 0; return x; }
+      const f = Math.min(1, a);
+      const kHp = 1 - Math.exp(-2 * Math.PI * (40 + 560 * f) / rate);
+      const kLp = 1 - Math.exp(-2 * Math.PI * (1800 + 18000 * (1 - f) * (1 - f)) / rate);
+      s.hp += kHp * (x - s.hp);                    // follows the lows; subtracting it removes them
+      let y = x - s.hp;
+      s.lp += kLp * (y - s.lp); y = s.lp;
+      y = Math.tanh(y * (1 + 10 * a)) * 0.85;      // overdrive
+      const q = Math.pow(2, Math.max(1, 15 - 11 * a));
+      y = Math.round(y * q) / q;                   // fewer bits
+      const hold = 1 + Math.floor(a * a * 24);     // lower sample rate
+      if (s.n++ % hold === 0) s.held = y;
+      return s.held;
+    };
+  }
+  // applies the Shakal sound of the layers to a finished (exported) mix
+  function shakalBuffer(buf) {
+    const rate = buf.sampleRate, crush = makeCrusher(rate);
+    for (let c = 0; c < Math.min(2, buf.numberOfChannels); c++) {
+      const d = buf.getChannelData(c);
+      let a = 0;
+      for (let i = 0; i < d.length; i++) {
+        if ((i & 255) === 0) a = shakalAudioAt(i / rate);
+        d[i] = crush(d[i], c, a);
+      }
+    }
+  }
+  let ac = null, recDest = null, bus = null, liveShakal = 0;
   function audioCtx() {
     if (!ac) {
       ac = new (window.AudioContext || window.webkitAudioContext)();
       recDest = ac.createMediaStreamDestination();
+      // every sound goes through the Shakal processor before the speakers / the recorder
+      bus = ac.createGain();
+      const crush = makeCrusher(ac.sampleRate);
+      const proc = ac.createScriptProcessor(1024, 2, 2);
+      let a = 0;
+      proc.onaudioprocess = (e) => {
+        const ib = e.inputBuffer, ob = e.outputBuffer, n = ib.length;
+        const target = state.playing ? liveShakal : 0;
+        for (let c = 0; c < 2; c++) {
+          const inp = ib.getChannelData(Math.min(c, ib.numberOfChannels - 1)), out = ob.getChannelData(c);
+          let k = a;
+          for (let i = 0; i < n; i++) { k += (target - k) * 0.002; out[i] = crush(inp[i], c, k); }
+          if (c === 1) a = k;
+        }
+      };
+      bus.connect(proc);
+      proc.connect(ac.destination);
+      proc.connect(recDest);
     }
     if (ac.state === 'suspended') ac.resume();
     return ac;
@@ -343,8 +498,7 @@
     try {
       const ctx = audioCtx();
       const node = ctx.createMediaElementSource(el);
-      node.connect(ctx.destination);
-      node.connect(recDest);
+      node.connect(bus);
       el._routed = true;
     } catch { /* no audio */ }
   }
@@ -400,9 +554,39 @@
     b.onclick = () => addLayer(tpl, tpl.poster || c);
     return b;
   }
+  // Shakal tile: a picture drawn on the spot, then crushed into big blocks and few colours
+  function shakalTile() {
+    const b = document.createElement('button');
+    b.className = 'tpl';
+    b.title = 'Add "Shakal" — destroys video and sound quality (stack several for more)';
+    const c = document.createElement('canvas');
+    c.width = 200; c.height = 150;
+    const x = c.getContext('2d');
+    const g = x.createLinearGradient(0, 0, 200, 150);
+    g.addColorStop(0, '#ff3d00'); g.addColorStop(0.5, '#ffd500'); g.addColorStop(1, '#00b7ff');
+    x.fillStyle = g; x.fillRect(0, 0, 200, 150);
+    x.fillStyle = '#fff'; x.beginPath(); x.arc(150, 45, 26, 0, 7); x.fill();
+    x.fillStyle = '#111'; x.fillRect(0, 105, 200, 45);
+    x.font = '900 34px Impact, "Arial Black", sans-serif'; x.textAlign = 'center';
+    x.lineWidth = 6; x.strokeStyle = '#000'; x.strokeText('360p', 70, 70); x.fillStyle = '#fff'; x.fillText('360p', 70, 70);
+    const small = document.createElement('canvas'); small.width = 25; small.height = 19;
+    const sx = small.getContext('2d'); sx.drawImage(c, 0, 0, 25, 19);
+    const d = sx.getImageData(0, 0, 25, 19);
+    for (let i = 0; i < d.data.length; i += 4) for (let k = 0; k < 3; k++) d.data[i + k] = Math.round((d.data[i + k] + (Math.random() - 0.5) * 60) / 64) * 64;
+    sx.putImageData(d, 0, 0);
+    x.imageSmoothingEnabled = false; x.drawImage(small, 0, 0, 200, 150);
+    b.append(c);
+    const label = document.createElement('div');
+    label.className = 'name';
+    label.innerHTML = `<span>Shakal</span><span class="add"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>`;
+    b.append(label);
+    b.onclick = () => addShakal(c);
+    return b;
+  }
   function renderTemplates() {
     ui.templates.innerHTML = '';
     TEMPLATES.forEach((t) => ui.templates.append(tplTile(t)));
+    ui.templates.append(shakalTile());
     const add = document.createElement('button');
     add.className = 'tpl custom';
     add.innerHTML = `<div><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Custom template</div>`;
@@ -460,9 +644,24 @@
     state.layers.push(l);
     renderAll();
   }
+  // Shakal layer: no video, just two strengths (0..2) over its blue range
+  function addShakal(thumbCanvas) {
+    const l = {
+      id: ++layerSeq, tpl: SHAKAL, kind: 'shakal', vq: 0.6, aq: 0.6, cache: null,
+      duration: 1, speed: 1, start: 0, end: state.length, clips: [], auto: false, thumb: null, thumbUrl: '',
+    };
+    l.thumb = document.createElement('canvas');
+    l.thumb.width = 108; l.thumb.height = 72;
+    l.thumb.getContext('2d').drawImage(thumbCanvas, 0, 0, 108, 72);
+    l.thumbUrl = l.thumb.toDataURL('image/jpeg', 0.7);
+    state.layers.push(l);
+    renderAll();
+    if (!state.playing) render(currentTime());
+  }
   function removeLayer(l) {
-    l.video.pause(); l.video.removeAttribute('src'); l.video.load();
-    gl.deleteTexture(l.tex);
+    if (l.video) { l.video.pause(); l.video.removeAttribute('src'); l.video.load(); }
+    if (l.tex) gl.deleteTexture(l.tex);
+    if (l.cache) freeTarget(l.cache);
     state.layers = state.layers.filter((x) => x !== l);
     if (TL.sel?.l === l) TL.sel = null;
     renderAll();
@@ -484,6 +683,7 @@
     state.layers.forEach((l, i) => {
       const li = document.createElement('li');
       li.className = 'layer';
+      if (l.kind === 'shakal') return ui.layers.append(shakalRow(l, i));
       li.innerHTML = `
         <span class="idx">${i + 1}</span>
         <span class="thumb"></span>
@@ -532,6 +732,47 @@
       ui.layers.append(li);
     });
   }
+  // Shakal row: how hard to destroy the picture and the sound (0..200%)
+  function shakalRow(l, i) {
+    const li = document.createElement('li');
+    li.className = 'layer';
+    li.innerHTML = `
+      <span class="idx">${i + 1}</span>
+      <span class="thumb"></span>
+      <span class="lname">Shakal</span>
+      <label class="field"><span>Video <b data-o="vq"></b></span><input type="range" data-k="vq" min="0" max="2" step="0.05"></label>
+      <label class="field"><span>Sound <b data-o="aq"></b></span><input type="range" data-k="aq" min="0" max="2" step="0.05"></label>
+      <span></span><span></span>
+      <span class="actions">
+        <button class="mini" data-a="up" title="Move up" ${i === 0 ? 'disabled' : ''}>${ICON.up}</button>
+        <button class="mini" data-a="down" title="Move down" ${i === state.layers.length - 1 ? 'disabled' : ''}>${ICON.down}</button>
+        <button class="mini" data-a="del" title="Remove">${ICON.del}</button>
+      </span>`;
+    li.querySelector('.thumb').append(l.thumb);
+    const out = () => {
+      li.querySelector('[data-o=vq]').textContent = Math.round(l.vq * 100) + '%';
+      li.querySelector('[data-o=aq]').textContent = Math.round(l.aq * 100) + '%';
+    };
+    li.querySelectorAll('[data-k]').forEach((inp) => {
+      inp.value = l[inp.dataset.k];
+      inp.addEventListener('input', () => {
+        l[inp.dataset.k] = +inp.value;
+        if (l.cache) l.cache.stamp = -1;
+        out();
+        if (!state.playing) render(currentTime());
+      });
+    });
+    li.querySelector('.actions').addEventListener('click', (e) => {
+      const a = e.target.closest('[data-a]')?.dataset.a;
+      if (!a) return;
+      if (a === 'del') return removeLayer(l);
+      const j = a === 'up' ? i - 1 : i + 1;
+      [state.layers[i], state.layers[j]] = [state.layers[j], state.layers[i]];
+      renderAll();
+    });
+    out();
+    return li;
+  }
 
   // ---------- timeline ----------
   // black bar = media length; every effect gets its own group of rows:
@@ -571,6 +812,22 @@
           <span class="tl-len">${state.length.toFixed(1)}s</span>
         </div></div></div>`;
     state.layers.forEach((l, li) => {
+      if (l.kind === 'shakal') {
+        // processing effect: only the blue range (where the quality is destroyed), no bursts
+        rows += `
+        <div class="tl-group">
+          <div class="tl-row range"><div class="tl-label"><img src="${l.thumbUrl}" alt=""><span class="tl-name">${li + 1}. Shakal</span></div>
+            <div class="tl-lane" data-drag="seek">
+              <div class="tl-span" data-drag="span-move" data-l="${li}" style="left:${px(l.start)};width:${px(l.end - l.start)}"
+                title="Where Shakal is on — drag to move, drag the ends to resize">
+                <span class="tl-h l" data-drag="span-l" data-l="${li}"></span>
+                <span class="tl-span-txt">${(l.end - l.start).toFixed(1)}s</span>
+                <span class="tl-h r" data-drag="span-r" data-l="${li}"></span>
+              </div>
+            </div></div>
+        </div>`;
+        return;
+      }
       // overlapping bursts go to separate sub-rows (kept as they are while dragging so nothing jumps)
       const vis = l.clips.map((c, ci) => ({ c, ci, a: Math.max(c.at, l.start), b: Math.min(c.at + c.len, l.end) })).filter((v) => v.b - v.a > 0.001);
       if (!TL.drag) {
@@ -704,7 +961,7 @@
       }
       case 'clip-r': c.len = Math.max(Math.max(MIN_CLIP, l.duration / 16), snap(d.at + d.clen + dt, c) - d.at); l.auto = false; break;
     }
-    if (d.kind !== 'seek') { if (l) syncLayer(l, currentTime(), true); renderTimeline(); }
+    if (d.kind !== 'seek') { if (l) syncLayer(l, currentTime(), true); renderTimeline(); if (!state.playing) render(currentTime()); }
   });
   const endDrag = () => {
     const d = TL.drag;
@@ -823,7 +1080,7 @@
     ui.busyText.textContent = title;
     ui.exportBtn.disabled = true;
     if (s.kind === 'video') s.el.pause();
-    state.layers.forEach((l) => l.video.pause());
+    state.layers.forEach((l) => l.video?.pause());
     try {
       setCanvasSize(short);
       await work(job, ui.view.width, ui.view.height);
@@ -880,7 +1137,7 @@
   async function mixAudio(total, rate) {
     const s = state.src;
     const base = s.kind === 'video' ? await decodeAudio(s.file) : null;
-    const fx = await Promise.all(state.layers.map((l) => decodeAudio(l.tpl.url)));
+    const fx = await Promise.all(state.layers.map((l) => (l.kind ? null : decodeAudio(l.tpl.url))));
     if (!base && !fx.some(Boolean)) return null;
     const off = new OfflineAudioContext(2, Math.ceil(total * rate), rate);
     if (base) { const n = off.createBufferSource(); n.buffer = base; n.connect(off.destination); n.start(0); }
@@ -914,6 +1171,7 @@
       const RATE = 48000;
       const vcfg = await pickAvc(w, h);
       const [mix, acfg] = await Promise.all([mixAudio(total, RATE), pickAudio(RATE)]);
+      if (mix) shakalBuffer(mix);
       const withAudio = mix && acfg;
       const muxer = new Muxer({
         target: new ArrayBufferTarget(),
@@ -1066,7 +1324,7 @@
     } else {
       state.pausedAt = t;
       if (state.src.kind === 'video') state.src.el.pause();
-      state.layers.forEach((l) => l.video.pause());
+      state.layers.forEach((l) => l.video?.pause());
     }
   }
 
