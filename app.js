@@ -83,7 +83,7 @@
     void main() {
       vec2 p = uv * rs;
       float a = clamp(amt, 0.0, 1.0);
-      float blk = max(2.0, floor(1.0 + amt * min(rs.x, rs.y) / 36.0));
+      float blk = min(max(rs.x, rs.y), max(2.0, floor(1.0 + amt * min(rs.x, rs.y) / 36.0)));
       vec2 b0 = floor(p / blk) * blk;
       vec2 o1 = vec2(.25, .25), o2 = vec2(.75, .25), o3 = vec2(.25, .75), o4 = vec2(.75, .75);
       vec3 avg = (at(b0 + blk * o1) + at(b0 + blk * o2) + at(b0 + blk * o3) + at(b0 + blk * o4)) * .25;
@@ -100,7 +100,7 @@
       vec3 col = wash(mix(lo, clamp(avg - dot(avg, W3) + dot(lo, W3), 0.0, 1.0), a), a);
       // compare like with like: the new block (washed) against what is on screen now
       vec3 pavg = (old(b0 + blk * o1) + old(b0 + blk * o2) + old(b0 + blk * o3) + old(b0 + blk * o4)) * .25;
-      float thr = 0.02 + 0.16 * a + 0.12 * max(amt - 1.0, 0.0);
+      float thr = min(0.75, 0.02 + 0.16 * a + 0.12 * max(amt - 1.0, 0.0));
       if (first < 0.5 && length(wash(avg, a) - pavg) < thr && hash(b0) > 0.03) col = old(p);
       gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
     }`;
@@ -198,7 +198,7 @@
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, c.a.tex);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.tex);
     gl.blendFunc(gl.ONE, gl.ZERO);
-    gl.uniform2f(SK.s, 1, 1); gl.uniform2f(SK.rs, w, h); gl.uniform1f(SK.amt, l.vq);
+    gl.uniform2f(SK.s, 1, 1); gl.uniform2f(SK.rs, w, h); gl.uniform1f(SK.amt, Math.min(l.vq, 1e4));
     gl.uniform1f(SK.seed, (c.n++ % 97) * 1.37); gl.uniform1f(SK.first, c.fresh ? 1 : 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     c.fresh = false;
@@ -207,8 +207,13 @@
     drawTex(c.a.tex);
   }
   const shakalOn = (l, t) => l.kind === 'shakal' && t >= l.start && t < l.end;
-  // stacked Shakal layers add up (and can go past 100%)
-  const shakalAudioAt = (t) => Math.min(3, state.layers.reduce((a, l) => a + (shakalOn(l, t) ? l.aq : 0), 0));
+  // Shakal sound at time t, in dB (null = no Shakal here). Stacked layers add up: their dB are summed
+  // (-inf anywhere = silence).
+  function shakalAudioAt(t) {
+    let db = null;
+    for (const l of state.layers) if (shakalOn(l, t)) db = (db === null ? 0 : db) + l.adb;
+    return Number.isNaN(db) ? -Infinity : db;   // +inf + -inf -> silence wins
+  }
 
   // ---------- layers: a blue span with green bursts inside ----------
   // layer.start / layer.end — where the effect is allowed (blue bar)
@@ -456,57 +461,79 @@
   }
 
   // ---------- audio ----------
-  // Shakal sound, like a "bad shakalizator" bot: huge gain into hard clipping (earrape) and the
-  // dull top end of a starved AAC stream (~12.5 kHz at 100%). Past 100% it is also bit-crushed.
-  // Kept as source text: the same code runs here (export) and in the AudioWorklet (live preview).
+  // Shakal sound, like a "bad shakalizator" bot. The strength is a gain in dB, from -Infinity to +Infinity:
+  //   -inf = silence, below 0 = quieter, 0 = untouched, above 0 = driven into hard clipping (earrape)
+  //   with the dull top end of a starved AAC stream (+30 dB ~ the bots), past +30 dB also bit-crushed,
+  //   +inf = a pure square wave. db = null means "Shakal is off here" (sound passes through untouched).
+  // Used for the saved MP4; the live preview mirrors it with native audio nodes (see updateLiveShakal).
+  const SHAKAL_DB_SRC = `function shakalParams(db) {
+    const f = Math.max(0, Math.min(1, db / 30)), extra = Math.max(0, Math.min(3, (db - 30) / 30));
+    return {
+      gain: db === Infinity ? Infinity : Math.pow(10, db / 20),
+      fc: Math.max(2500, 20000 - 8500 * f - 5000 * extra),
+      bits: db > 30 ? Math.max(2, 16 - 10 * extra) : 0,
+      hold: db > 30 ? 1 + Math.floor(extra * extra * 12) : 1,
+      post: 1 / (1 + 0.8 * f),
+    };
+  }`;
   const CRUSHER_SRC = `function makeCrusher(rate) {
+    const shakalParams = (${SHAKAL_DB_SRC});
     // two cascaded RBJ low-pass biquads = a steep codec-like cut
     const stage = () => ({ x1: 0, x2: 0, y1: 0, y2: 0 });
     const ch = [0, 1].map(() => ({ st: [stage(), stage()], held: 0, n: 0 }));
-    let lastA = -1, b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-    const coef = (a) => {
-      const f = Math.min(1, a);
-      const fc = Math.min(rate * 0.45, Math.max(2500, 20000 - 8500 * f - 5000 * Math.max(0, a - 1)));
+    let lastDb = NaN, P = null, b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    const coef = (db) => {
+      P = shakalParams(db);
+      const fc = Math.min(rate * 0.45, P.fc);
       const w = 2 * Math.PI * fc / rate, cs = Math.cos(w), al = Math.sin(w) / (2 * 0.7071), n = 1 + al;
-      b0 = (1 - cs) / 2 / n; b1 = (1 - cs) / n; b2 = b0; a1 = -2 * cs / n; a2 = (1 - al) / n; lastA = a;
+      b0 = (1 - cs) / 2 / n; b1 = (1 - cs) / n; b2 = b0; a1 = -2 * cs / n; a2 = (1 - al) / n; lastDb = db;
     };
-    return (x, c, a) => {
+    return (x, c, db) => {
       const s = ch[c];
-      if (a <= 0.001) { for (const q of s.st) { q.x1 = q.x2 = q.y1 = q.y2 = x; } s.held = x; s.n = 0; return x; }
-      if (Math.abs(a - lastA) > 1e-4) coef(a);
-      let y = x * Math.pow(10, (6 + 24 * a) / 20);
+      if (db === null) { for (const q of s.st) { q.x1 = q.x2 = q.y1 = q.y2 = x; } s.held = x; s.n = 0; return x; }
+      if (db !== lastDb) coef(db);
+      let y = P.gain === Infinity ? (x > 0 ? 1 : x < 0 ? -1 : 0) : x * P.gain;
       y = y > 1 ? 1 : y < -1 ? -1 : y;
       for (const q of s.st) {
         const o = b0 * y + b1 * q.x1 + b2 * q.x2 - a1 * q.y1 - a2 * q.y2;
         q.x2 = q.x1; q.x1 = y; q.y2 = q.y1; q.y1 = o; y = o;
       }
-      if (a > 1) {
-        const q = Math.pow(2, Math.max(2, 16 - 10 * (a - 1)));
+      if (P.bits) {
+        const q = Math.pow(2, P.bits);
         y = Math.round(y * q) / q;
-        const hold = 1 + Math.floor((a - 1) * (a - 1) * 12);
-        if (s.n++ % hold === 0) s.held = y;
+        if (s.n++ % P.hold === 0) s.held = y;
         y = s.held;
       }
-      return y * 0.55;
+      return y * P.post;
     };
   }`;
+  const shakalParams = new Function(`return (${SHAKAL_DB_SRC})`)();
   const makeCrusher = new Function(`return (${CRUSHER_SRC})`)();
   // applies the Shakal sound of the layers to a finished (exported) mix
   function shakalBuffer(buf) {
     const rate = buf.sampleRate, crush = makeCrusher(rate);
     for (let c = 0; c < Math.min(2, buf.numberOfChannels); c++) {
       const d = buf.getChannelData(c);
-      let a = 0;
+      let db = null;
       for (let i = 0; i < d.length; i++) {
-        if ((i & 255) === 0) a = shakalAudioAt(i / rate);
-        d[i] = crush(d[i], c, a);
+        if ((i & 255) === 0) db = shakalAudioAt(i / rate);
+        d[i] = crush(d[i], c, db);
       }
     }
   }
-  // live sound: bus -> dry -> speakers/recorder, and bus -> Shakal worklet -> wet -> speakers/recorder.
-  // Only one path is open at a time, so the sound is never doubled; with no Shakal the sound is untouched.
-  let ac = null, recDest = null, bus = null, liveShakal = 0;
-  const live = { dry: null, wet: null, node: null, sent: -1 };
+  // Live sound: bus -> dry -> speakers/recorder (clean), and bus -> Shakal chain -> wet -> speakers/recorder.
+  // Only one path is open at a time, so the sound is never doubled. The live Shakal chain is built only
+  // from the browser's native nodes (no script / worklet), so the audio keeps running on the browser's
+  // real-time thread and never crackles when the page is busy. It mirrors makeCrusher() up to 100%;
+  // the saved MP4 always gets the full makeCrusher() treatment.
+  let ac = null, recDest = null, bus = null, liveShakal = null;
+  const live = { dry: null, wet: null, pre: null, lp: [], q: null, post: null, sent: undefined, bits: 0 };
+  const linearCurve = (() => { const c = new Float32Array(2049); for (let i = 0; i < c.length; i++) c[i] = i / 1024 - 1; return c; })();
+  function stairCurve(bits) {
+    const q = Math.pow(2, bits), c = new Float32Array(8193);
+    for (let i = 0; i < c.length; i++) { const x = i / 4096 - 1; c[i] = Math.round(x * q) / q; }
+    return c;
+  }
   function audioCtx() {
     if (!ac) {
       ac = new (window.AudioContext || window.webkitAudioContext)();
@@ -515,44 +542,37 @@
       live.dry = ac.createGain(); live.wet = ac.createGain(); live.wet.gain.value = 0;
       for (const g of [live.dry, live.wet]) { g.connect(ac.destination); g.connect(recDest); }
       bus.connect(live.dry);
-      // the processor runs on the audio thread, so a busy page never makes the sound stutter
-      if (ac.audioWorklet) {
-        const code = `const makeCrusher = (${CRUSHER_SRC});
-          class ShakalProc extends AudioWorkletProcessor {
-            static get parameterDescriptors() { return [{ name: 'amount', defaultValue: 0, minValue: 0, maxValue: 3, automationRate: 'k-rate' }]; }
-            constructor() { super(); this.crush = makeCrusher(sampleRate); }
-            process(inputs, outputs, params) {
-              const inp = inputs[0], out = outputs[0], a = params.amount[0];
-              for (let c = 0; c < out.length; c++) {
-                const i = inp[Math.min(c, inp.length - 1)], o = out[c];
-                if (!i) { o.fill(0); continue; }
-                for (let n = 0; n < o.length; n++) o[n] = this.crush(i[n], c, a);
-              }
-              return true;
-            }
-          }
-          registerProcessor('shakal-proc', ShakalProc);`;
-        const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
-        ac.audioWorklet.addModule(url).then(() => {
-          live.node = new AudioWorkletNode(ac, 'shakal-proc', { outputChannelCount: [2] });
-          bus.connect(live.node); live.node.connect(live.wet);
-          live.sent = -1; updateLiveShakal();
-        }).catch(() => { /* no live Shakal sound; the saved MP4 still gets it */ });
-      }
+      // gain -> hard clip (a linear wave shaper clamps everything past +-1) -> 2 steep low-pass -> fewer bits -> level
+      live.pre = ac.createGain();
+      const clip = ac.createWaveShaper(); clip.curve = linearCurve;
+      live.lp = [ac.createBiquadFilter(), ac.createBiquadFilter()];
+      for (const f of live.lp) { f.type = 'lowpass'; f.Q.value = 0.7071; }
+      live.q = ac.createWaveShaper(); live.q.curve = linearCurve;
+      live.post = ac.createGain(); live.post.gain.value = 0.55;
+      bus.connect(live.pre); live.pre.connect(clip); clip.connect(live.lp[0]); live.lp[0].connect(live.lp[1]);
+      live.lp[1].connect(live.q); live.q.connect(live.post); live.post.connect(live.wet);
     }
     if (ac.state === 'suspended') ac.resume();
     return ac;
   }
   // switches the live sound between the clean and the Shakal path (short crossfade, no clicks)
   function updateLiveShakal() {
-    if (!ac || !live.node) return;
-    const a = state.playing ? liveShakal : 0;
-    if (Math.abs(a - live.sent) < 1e-3) return;
-    live.sent = a;
-    const now = ac.currentTime;
-    if (a > 0) live.node.parameters.get('amount').setValueAtTime(a, now);
-    live.dry.gain.setTargetAtTime(a > 0 ? 0 : 1, now, 0.01);
-    live.wet.gain.setTargetAtTime(a > 0 ? 1 : 0, now, 0.01);
+    if (!ac || !live.pre) return;
+    const db = state.playing ? liveShakal : null;   // null = no Shakal now
+    if (db === live.sent) return;
+    live.sent = db;
+    const now = ac.currentTime, on = db !== null;
+    if (on) {
+      const P = shakalParams(db);
+      // +inf: a gain this big turns any sound into a square wave; -inf: silence
+      live.pre.gain.setTargetAtTime(P.gain === Infinity ? 1e6 : P.gain, now, 0.01);
+      for (const lp of live.lp) lp.frequency.setTargetAtTime(Math.min(ac.sampleRate * 0.45, P.fc), now, 0.01);
+      live.post.gain.setTargetAtTime(P.post, now, 0.01);
+      const bits = Math.round(P.bits);
+      if (bits !== live.bits) { live.q.curve = bits ? stairCurve(bits) : linearCurve; live.bits = bits; }
+    }
+    live.dry.gain.setTargetAtTime(on ? 0 : 1, now, 0.01);
+    live.wet.gain.setTargetAtTime(on ? 1 : 0, now, 0.01);
   }
   function routeAudio(el) {
     if (el._routed) return;
@@ -705,12 +725,22 @@
     state.layers.push(l);
     renderAll();
   }
-  // Shakal layer: no video, just two strengths (0..2) over its blue range
+  // Shakal sliders (positions 0..100):
+  //   Quality: 100 = 100 % (clean), 50 = 0 % (very bad), below 50 the quality goes negative, 0 = -inf %
+  //   Sound:   0 = -inf dB (silence), 50 = 0 dB (untouched), 100 = +inf dB (square wave)
+  const qualityAt = (u) => (u >= 50 ? (u - 50) * 2 : u <= 0 ? -Infinity : -(Math.pow(10, (50 - u) / 12.5) - 1) * 10);
+  const amountOf = (q) => (q === -Infinity ? Infinity : (2 * (100 - q)) / 100);   // 100 % -> 0, 0 % -> 2
+  const dbAt = (v) => (v <= 0 ? -Infinity : v >= 100 ? Infinity : (v - 50) * 1.2);
+  const fmtQuality = (q) => (q === -Infinity ? '−∞%' : (q < 0 ? '−' : '') + Math.round(Math.abs(q)).toLocaleString('en-US') + '%');
+  const fmtDb = (d) => (d === -Infinity ? '−∞ dB' : d === Infinity ? '+∞ dB' : (d > 0 ? '+' : d < 0 ? '−' : '') + Math.abs(d).toFixed(1) + ' dB');
+  function shakalFromSliders(l) { l.vq = amountOf(qualityAt(l.vpos)); l.adb = dbAt(l.apos); }
+  // Shakal layer: no video, just the two sliders over its blue range
   function addShakal(thumbCanvas) {
     const l = {
-      id: ++layerSeq, tpl: SHAKAL, kind: 'shakal', vq: 0.6, aq: 0.6, cache: null,
+      id: ++layerSeq, tpl: SHAKAL, kind: 'shakal', vpos: 85, apos: 67, vq: 0, adb: 0, cache: null,
       duration: 1, speed: 1, start: 0, end: state.length, clips: [], auto: false, thumb: null, thumbUrl: '',
     };
+    shakalFromSliders(l);
     l.thumb = document.createElement('canvas');
     l.thumb.width = 108; l.thumb.height = 72;
     l.thumb.getContext('2d').drawImage(thumbCanvas, 0, 0, 108, 72);
@@ -801,8 +831,8 @@
       <span class="idx">${i + 1}</span>
       <span class="thumb"></span>
       <span class="lname">Shakal</span>
-      <label class="field"><span>Video <b data-o="vq"></b></span><input type="range" data-k="vq" min="0" max="2" step="0.05"></label>
-      <label class="field"><span>Sound <b data-o="aq"></b></span><input type="range" data-k="aq" min="0" max="2" step="0.05"></label>
+      <label class="field" title="100% = clean, 0% = very bad, below 0 = even worse, far left = −∞"><span>Quality <b data-o="vpos"></b></span><input type="range" data-k="vpos" min="0" max="100" step="0.5"></label>
+      <label class="field" title="−∞ dB = silence, 0 dB = untouched, above 0 = earrape, far right = +∞"><span>Sound <b data-o="apos"></b></span><input type="range" data-k="apos" min="0" max="100" step="0.5"></label>
       <span></span><span></span>
       <span class="actions">
         <button class="mini" data-a="up" title="Move up" ${i === 0 ? 'disabled' : ''}>${ICON.up}</button>
@@ -811,13 +841,14 @@
       </span>`;
     li.querySelector('.thumb').append(l.thumb);
     const out = () => {
-      li.querySelector('[data-o=vq]').textContent = Math.round(l.vq * 100) + '%';
-      li.querySelector('[data-o=aq]').textContent = Math.round(l.aq * 100) + '%';
+      li.querySelector('[data-o=vpos]').textContent = fmtQuality(qualityAt(l.vpos));
+      li.querySelector('[data-o=apos]').textContent = fmtDb(l.adb);
     };
     li.querySelectorAll('[data-k]').forEach((inp) => {
       inp.value = l[inp.dataset.k];
       inp.addEventListener('input', () => {
         l[inp.dataset.k] = +inp.value;
+        shakalFromSliders(l);
         if (l.cache) l.cache.fresh = true;
         out();
         if (!state.playing) render(currentTime());
