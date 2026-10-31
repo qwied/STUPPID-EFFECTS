@@ -63,32 +63,45 @@
       }
       gl_FragColor = vec4(c.rgb, a) * o;
     }`;
-  // Shakal: pixel blocks + JPEG-like macroblock smear + chroma bleed + deep-fry + banding + block noise.
-  // amt goes from 0 (clean) to 2 (destroyed); the low frame rate is done in shakalPass().
+  // Shakal = a video squeezed through a starved codec (like "bad shakalizator" bots):
+  //  - every block keeps only its low frequencies: a few samples blended smoothly, hard edges between blocks;
+  //  - colour is averaged over the whole block (chroma subsampling);
+  //  - a block that barely changed is not "sent": the old one stays, so moving things leave trails;
+  //  - washed out, faded colours.
+  // amt: 0 = clean, 1 = the bot, 2 = destroyed. pv = this layer's previous output frame.
   const SHAKAL_FS = `#ifdef GL_FRAGMENT_PRECISION_HIGH
     precision highp float;
     #else
     precision mediump float;
     #endif
-    varying vec2 uv; uniform sampler2D t; uniform vec2 rs; uniform float amt; uniform float seed;
+    varying vec2 uv; uniform sampler2D t; uniform sampler2D pv; uniform vec2 rs; uniform float amt; uniform float seed; uniform float first;
+    const vec3 W3 = vec3(.299, .587, .114);
     float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233)) + seed) * 43758.5453); }
     vec3 at(vec2 px) { return texture2D(t, clamp(px / rs, 0.0, 1.0)).rgb; }
+    vec3 old(vec2 px) { return texture2D(pv, clamp(px / rs, 0.0, 1.0)).rgb; }
+    vec3 wash(vec3 c, float a) { c = pow(clamp(c, 0.0, 1.0), vec3(1.0 - 0.25 * a)); return mix(vec3(dot(c, W3)), c, 1.0 - 0.12 * a); }
     void main() {
       vec2 p = uv * rs;
       float a = clamp(amt, 0.0, 1.0);
-      float blk = floor(1.0 + amt * amt * min(rs.x, rs.y) / 64.0);
-      vec2 cell = floor(p / blk);
-      vec3 col = at((cell + 0.5) * blk);
-      float mb = blk * 8.0; vec2 m0 = floor(p / mb) * mb;
-      vec3 avg = (at(m0 + mb * vec2(.25, .25)) + at(m0 + mb * vec2(.75, .25)) + at(m0 + mb * vec2(.25, .75)) + at(m0 + mb * vec2(.75, .75))) * .25;
-      col = mix(col, avg, a * 0.55);
-      vec3 cc = at((floor(p / (blk * 2.0)) + 0.5) * blk * 2.0);
-      float y = dot(col, vec3(.299, .587, .114)), yc = dot(cc, vec3(.299, .587, .114));
-      col = mix(col, clamp(cc - yc + y, 0.0, 1.0), a);
-      col = (col - 0.5) * (1.0 + amt * 0.7) + 0.5;
-      float l = dot(col, vec3(.299, .587, .114)); col = mix(vec3(l), col, 1.0 + amt * 1.1);
-      col += (hash(cell) - 0.5) * amt * 0.12;
-      float lv = max(2.0, mix(48.0, 7.0, a) - 2.5 * max(amt - 1.0, 0.0)); col = floor(clamp(col, 0.0, 1.0) * lv + 0.5) / lv;
+      float blk = max(2.0, floor(1.0 + amt * min(rs.x, rs.y) / 36.0));
+      vec2 b0 = floor(p / blk) * blk;
+      vec2 o1 = vec2(.25, .25), o2 = vec2(.75, .25), o3 = vec2(.25, .75), o4 = vec2(.75, .75);
+      vec3 avg = (at(b0 + blk * o1) + at(b0 + blk * o2) + at(b0 + blk * o3) + at(b0 + blk * o4)) * .25;
+      float n = amt < 0.5 ? 3.0 : (amt <= 1.5 ? 2.0 : 1.0);   // samples per block side
+      vec3 lo;
+      if (n < 1.5) lo = at(b0 + blk * 0.5);
+      else {
+        float g = blk / n;
+        vec2 q = (p - b0) / g - 0.5;
+        vec2 qi = clamp(floor(q), 0.0, n - 2.0), qf = clamp(q - qi, 0.0, 1.0);
+        vec2 c0 = b0 + (qi + 0.5) * g, c1 = c0 + g;
+        lo = mix(mix(at(c0), at(vec2(c1.x, c0.y)), qf.x), mix(at(vec2(c0.x, c1.y)), at(c1), qf.x), qf.y);
+      }
+      vec3 col = wash(mix(lo, clamp(avg - dot(avg, W3) + dot(lo, W3), 0.0, 1.0), a), a);
+      // compare like with like: the new block (washed) against what is on screen now
+      vec3 pavg = (old(b0 + blk * o1) + old(b0 + blk * o2) + old(b0 + blk * o3) + old(b0 + blk * o4)) * .25;
+      float thr = 0.02 + 0.16 * a + 0.12 * max(amt - 1.0, 0.0);
+      if (first < 0.5 && length(wash(avg, a) - pavg) < thr && hash(b0) > 0.03) col = old(p);
       gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
     }`;
   function shader(type, src) {
@@ -107,7 +120,9 @@
   gl.bindAttribLocation(shakalProg, 0, 'p');
   gl.linkProgram(shakalProg);
   if (!gl.getProgramParameter(shakalProg, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(shakalProg));
-  const SK = { s: gl.getUniformLocation(shakalProg, 's'), rs: gl.getUniformLocation(shakalProg, 'rs'), amt: gl.getUniformLocation(shakalProg, 'amt'), seed: gl.getUniformLocation(shakalProg, 'seed') };
+  const SK = {};
+  for (const k of ['s', 'rs', 'amt', 'seed', 'first', 't', 'pv']) SK[k] = gl.getUniformLocation(shakalProg, k);
+  gl.useProgram(shakalProg); gl.uniform1i(SK.t, 0); gl.uniform1i(SK.pv, 1);
   gl.useProgram(prog);
   gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
@@ -167,22 +182,29 @@
     gl.uniform1i(uK, 0); gl.uniform1f(uO, 1); gl.uniform2f(uS, 1, 1);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
-  // one Shakal layer: crunches src into the layer's own frame, which is only refreshed at a low
-  // frame rate (the stutter of a bad stream), then copies that frame to dst
+  const freeCache = (c) => { if (c) { freeTarget(c.a); freeTarget(c.b); } };
+  // one Shakal layer: crunches src using the layer's previous output (blocks that barely changed
+  // keep their old picture, which makes the trails), then copies the new frame to dst
   function shakalPass(l, src, dst, t, w, h) {
-    if (!l.cache || l.cache.w !== w || l.cache.h !== h) { freeTarget(l.cache); l.cache = makeTarget(w, h); }
-    const fps = Math.max(3, 30 - 25 * l.vq), stamp = Math.floor(t * fps + 1e-6);
-    if (l.cache.stamp !== stamp) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, l.cache.fb);
-      gl.useProgram(shakalProg);
-      gl.bindTexture(gl.TEXTURE_2D, src.tex);
-      gl.blendFunc(gl.ONE, gl.ZERO);
-      gl.uniform2f(SK.s, 1, 1); gl.uniform2f(SK.rs, w, h); gl.uniform1f(SK.amt, l.vq); gl.uniform1f(SK.seed, (stamp % 97) * 1.37);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      l.cache.stamp = stamp;
+    if (!l.cache || l.cache.a.w !== w || l.cache.a.h !== h) {
+      freeCache(l.cache);
+      l.cache = { a: makeTarget(w, h), b: makeTarget(w, h), fresh: true, n: 0 };
     }
+    const c = l.cache;
+    if (c.lastT === undefined || Math.abs(t - c.lastT) > 0.3) c.fresh = true;   // jump / loop: start clean
+    c.lastT = t;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, c.b.fb);
+    gl.useProgram(shakalProg);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, c.a.tex);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.tex);
+    gl.blendFunc(gl.ONE, gl.ZERO);
+    gl.uniform2f(SK.s, 1, 1); gl.uniform2f(SK.rs, w, h); gl.uniform1f(SK.amt, l.vq);
+    gl.uniform1f(SK.seed, (c.n++ % 97) * 1.37); gl.uniform1f(SK.first, c.fresh ? 1 : 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    c.fresh = false;
+    [c.a, c.b] = [c.b, c.a];          // the new frame becomes "previous" for the next one
     gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fb);
-    drawTex(l.cache.tex);
+    drawTex(c.a.tex);
   }
   const shakalOn = (l, t) => l.kind === 'shakal' && t >= l.start && t < l.end;
   // stacked Shakal layers add up (and can go past 100%)
@@ -232,7 +254,7 @@
     state.pausedAt = t;
     const s = state.src;
     if (s && s.kind === 'video') s.el.currentTime = Math.min(t, s.duration);
-    for (const l of state.layers) { syncLayer(l, t, true); if (l.cache) l.cache.stamp = -1; }
+    for (const l of state.layers) { syncLayer(l, t, true); if (l.cache) l.cache.fresh = true; }
   }
 
   // keep each effect <video> in sync with the shared clock
@@ -320,6 +342,7 @@
     }
     for (const l of state.layers) syncLayer(l, t, false);
     liveShakal = shakalAudioAt(t);
+    updateLiveShakal();
     render(t);
 
     movePlayhead(t);
@@ -433,27 +456,41 @@
   }
 
   // ---------- audio ----------
-  // Shakal sound: cheap-mic band (high-pass + low-pass), overdrive, bit crush and sample-rate drop.
-  // a = 0 leaves the sound untouched; 1 is a broken phone call; 2-3 is pure crunch.
-  function makeCrusher(rate) {
-    const ch = [0, 1].map(() => ({ lp: 0, hp: 0, prev: 0, held: 0, n: 0 }));
+  // Shakal sound, like a "bad shakalizator" bot: huge gain into hard clipping (earrape) and the
+  // dull top end of a starved AAC stream (~12.5 kHz at 100%). Past 100% it is also bit-crushed.
+  // Kept as source text: the same code runs here (export) and in the AudioWorklet (live preview).
+  const CRUSHER_SRC = `function makeCrusher(rate) {
+    // two cascaded RBJ low-pass biquads = a steep codec-like cut
+    const stage = () => ({ x1: 0, x2: 0, y1: 0, y2: 0 });
+    const ch = [0, 1].map(() => ({ st: [stage(), stage()], held: 0, n: 0 }));
+    let lastA = -1, b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    const coef = (a) => {
+      const f = Math.min(1, a);
+      const fc = Math.min(rate * 0.45, Math.max(2500, 20000 - 8500 * f - 5000 * Math.max(0, a - 1)));
+      const w = 2 * Math.PI * fc / rate, cs = Math.cos(w), al = Math.sin(w) / (2 * 0.7071), n = 1 + al;
+      b0 = (1 - cs) / 2 / n; b1 = (1 - cs) / n; b2 = b0; a1 = -2 * cs / n; a2 = (1 - al) / n; lastA = a;
+    };
     return (x, c, a) => {
       const s = ch[c];
-      if (a <= 0.001) { s.prev = x; s.lp = x; s.hp = 0; s.n = 0; return x; }
-      const f = Math.min(1, a);
-      const kHp = 1 - Math.exp(-2 * Math.PI * (40 + 560 * f) / rate);
-      const kLp = 1 - Math.exp(-2 * Math.PI * (1800 + 18000 * (1 - f) * (1 - f)) / rate);
-      s.hp += kHp * (x - s.hp);                    // follows the lows; subtracting it removes them
-      let y = x - s.hp;
-      s.lp += kLp * (y - s.lp); y = s.lp;
-      y = Math.tanh(y * (1 + 10 * a)) * 0.85;      // overdrive
-      const q = Math.pow(2, Math.max(1, 15 - 11 * a));
-      y = Math.round(y * q) / q;                   // fewer bits
-      const hold = 1 + Math.floor(a * a * 24);     // lower sample rate
-      if (s.n++ % hold === 0) s.held = y;
-      return s.held;
+      if (a <= 0.001) { for (const q of s.st) { q.x1 = q.x2 = q.y1 = q.y2 = x; } s.held = x; s.n = 0; return x; }
+      if (Math.abs(a - lastA) > 1e-4) coef(a);
+      let y = x * Math.pow(10, (6 + 24 * a) / 20);
+      y = y > 1 ? 1 : y < -1 ? -1 : y;
+      for (const q of s.st) {
+        const o = b0 * y + b1 * q.x1 + b2 * q.x2 - a1 * q.y1 - a2 * q.y2;
+        q.x2 = q.x1; q.x1 = y; q.y2 = q.y1; q.y1 = o; y = o;
+      }
+      if (a > 1) {
+        const q = Math.pow(2, Math.max(2, 16 - 10 * (a - 1)));
+        y = Math.round(y * q) / q;
+        const hold = 1 + Math.floor((a - 1) * (a - 1) * 12);
+        if (s.n++ % hold === 0) s.held = y;
+        y = s.held;
+      }
+      return y * 0.55;
     };
-  }
+  }`;
+  const makeCrusher = new Function(`return (${CRUSHER_SRC})`)();
   // applies the Shakal sound of the layers to a finished (exported) mix
   function shakalBuffer(buf) {
     const rate = buf.sampleRate, crush = makeCrusher(rate);
@@ -466,32 +503,56 @@
       }
     }
   }
+  // live sound: bus -> dry -> speakers/recorder, and bus -> Shakal worklet -> wet -> speakers/recorder.
+  // Only one path is open at a time, so the sound is never doubled; with no Shakal the sound is untouched.
   let ac = null, recDest = null, bus = null, liveShakal = 0;
+  const live = { dry: null, wet: null, node: null, sent: -1 };
   function audioCtx() {
     if (!ac) {
       ac = new (window.AudioContext || window.webkitAudioContext)();
       recDest = ac.createMediaStreamDestination();
-      // every sound goes through the Shakal processor before the speakers / the recorder
       bus = ac.createGain();
-      const crush = makeCrusher(ac.sampleRate);
-      const proc = ac.createScriptProcessor(1024, 2, 2);
-      let a = 0;
-      proc.onaudioprocess = (e) => {
-        const ib = e.inputBuffer, ob = e.outputBuffer, n = ib.length;
-        const target = state.playing ? liveShakal : 0;
-        for (let c = 0; c < 2; c++) {
-          const inp = ib.getChannelData(Math.min(c, ib.numberOfChannels - 1)), out = ob.getChannelData(c);
-          let k = a;
-          for (let i = 0; i < n; i++) { k += (target - k) * 0.002; out[i] = crush(inp[i], c, k); }
-          if (c === 1) a = k;
-        }
-      };
-      bus.connect(proc);
-      proc.connect(ac.destination);
-      proc.connect(recDest);
+      live.dry = ac.createGain(); live.wet = ac.createGain(); live.wet.gain.value = 0;
+      for (const g of [live.dry, live.wet]) { g.connect(ac.destination); g.connect(recDest); }
+      bus.connect(live.dry);
+      // the processor runs on the audio thread, so a busy page never makes the sound stutter
+      if (ac.audioWorklet) {
+        const code = `const makeCrusher = (${CRUSHER_SRC});
+          class ShakalProc extends AudioWorkletProcessor {
+            static get parameterDescriptors() { return [{ name: 'amount', defaultValue: 0, minValue: 0, maxValue: 3, automationRate: 'k-rate' }]; }
+            constructor() { super(); this.crush = makeCrusher(sampleRate); }
+            process(inputs, outputs, params) {
+              const inp = inputs[0], out = outputs[0], a = params.amount[0];
+              for (let c = 0; c < out.length; c++) {
+                const i = inp[Math.min(c, inp.length - 1)], o = out[c];
+                if (!i) { o.fill(0); continue; }
+                for (let n = 0; n < o.length; n++) o[n] = this.crush(i[n], c, a);
+              }
+              return true;
+            }
+          }
+          registerProcessor('shakal-proc', ShakalProc);`;
+        const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+        ac.audioWorklet.addModule(url).then(() => {
+          live.node = new AudioWorkletNode(ac, 'shakal-proc', { outputChannelCount: [2] });
+          bus.connect(live.node); live.node.connect(live.wet);
+          live.sent = -1; updateLiveShakal();
+        }).catch(() => { /* no live Shakal sound; the saved MP4 still gets it */ });
+      }
     }
     if (ac.state === 'suspended') ac.resume();
     return ac;
+  }
+  // switches the live sound between the clean and the Shakal path (short crossfade, no clicks)
+  function updateLiveShakal() {
+    if (!ac || !live.node) return;
+    const a = state.playing ? liveShakal : 0;
+    if (Math.abs(a - live.sent) < 1e-3) return;
+    live.sent = a;
+    const now = ac.currentTime;
+    if (a > 0) live.node.parameters.get('amount').setValueAtTime(a, now);
+    live.dry.gain.setTargetAtTime(a > 0 ? 0 : 1, now, 0.01);
+    live.wet.gain.setTargetAtTime(a > 0 ? 1 : 0, now, 0.01);
   }
   function routeAudio(el) {
     if (el._routed) return;
@@ -661,7 +722,7 @@
   function removeLayer(l) {
     if (l.video) { l.video.pause(); l.video.removeAttribute('src'); l.video.load(); }
     if (l.tex) gl.deleteTexture(l.tex);
-    if (l.cache) freeTarget(l.cache);
+    if (l.cache) freeCache(l.cache);
     state.layers = state.layers.filter((x) => x !== l);
     if (TL.sel?.l === l) TL.sel = null;
     renderAll();
@@ -757,7 +818,7 @@
       inp.value = l[inp.dataset.k];
       inp.addEventListener('input', () => {
         l[inp.dataset.k] = +inp.value;
-        if (l.cache) l.cache.stamp = -1;
+        if (l.cache) l.cache.fresh = true;
         out();
         if (!state.playing) render(currentTime());
       });
